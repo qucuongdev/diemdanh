@@ -27,14 +27,20 @@ DECLARE
     v_existing_sm RECORD;
 BEGIN
     -- Chỉ Admin mới được quyền tạo tài khoản
-    SELECT role INTO v_caller_role FROM public.profiles WHERE id = auth.uid();
-    IF v_caller_role != 'admin' THEN
+    SELECT role INTO v_caller_role FROM public.profiles WHERE id = auth.uid() AND is_active IS TRUE;
+    IF v_caller_role IS DISTINCT FROM 'admin' THEN
         RAISE EXCEPTION 'Chỉ có Chủ chuỗi (Admin) mới có quyền tạo tài khoản nhân viên mới!';
     END IF;
 
     -- RÀNG BUỘC 1: Chỉ cho phép tạo 'staff' hoặc 'storemanager' (chỉ duy nhất 1 Admin)
-    IF p_role NOT IN ('staff', 'storemanager') THEN
+    IF p_role IS NULL OR p_role NOT IN ('staff', 'storemanager') THEN
         RAISE EXCEPTION 'Hệ thống chỉ duy nhất có 1 tài khoản Admin tối cao! Bạn chỉ được tạo nhân viên với quyền Dược sĩ (staff) hoặc Quản lý (storemanager).';
+    END IF;
+
+    IF p_branch_id IS NULL OR length(trim(p_full_name)) = 0 OR p_full_name IS NULL
+       OR p_password IS NULL OR length(p_password) < 12 OR octet_length(p_password) > 72
+       OR p_email IS NULL OR position('@' IN p_email) < 2 THEN
+        RAISE EXCEPTION 'Invalid employee details';
     END IF;
 
     -- RÀNG BUỘC 2: Mỗi chi nhánh chỉ được có tối đa 1 Cửa hàng trưởng (Store Manager)
@@ -174,8 +180,8 @@ DECLARE
     v_old_role TEXT;
     v_existing_sm RECORD;
 BEGIN
-    SELECT role INTO v_caller_role FROM public.profiles WHERE id = auth.uid();
-    IF v_caller_role != 'admin' THEN
+    SELECT role INTO v_caller_role FROM public.profiles WHERE id = auth.uid() AND is_active IS TRUE;
+    IF v_caller_role IS DISTINCT FROM 'admin' THEN
         RAISE EXCEPTION 'Chỉ có Admin mới có quyền cập nhật phân quyền nhân sự!';
     END IF;
 
@@ -189,6 +195,11 @@ BEGIN
     -- Không cho phép nâng user khác lên Admin
     IF v_old_role != 'admin' AND p_role = 'admin' THEN
         RAISE EXCEPTION 'Hệ thống chỉ duy nhất có 1 tài khoản Admin!';
+    END IF;
+
+    IF v_old_role IS NULL OR p_role IS NULL OR p_full_name IS NULL OR length(trim(p_full_name)) = 0
+       OR p_is_active IS NULL OR (p_role <> 'admin' AND p_branch_id IS NULL) THEN
+        RAISE EXCEPTION 'Invalid employee details';
     END IF;
 
     -- Kiểm tra ràng buộc duy nhất 1 Store Manager / Chi nhánh
@@ -229,8 +240,8 @@ DECLARE
     v_caller_role TEXT;
     v_target_role TEXT;
 BEGIN
-    SELECT role INTO v_caller_role FROM public.profiles WHERE id = auth.uid();
-    IF v_caller_role != 'admin' THEN
+    SELECT role INTO v_caller_role FROM public.profiles WHERE id = auth.uid() AND is_active IS TRUE;
+    IF v_caller_role IS DISTINCT FROM 'admin' THEN
         RAISE EXCEPTION 'Chỉ có Admin mới có quyền xóa tài khoản nhân viên!';
     END IF;
 
@@ -245,3 +256,11 @@ BEGIN
     RETURN jsonb_build_object('success', TRUE, 'message', 'Đã xóa tài khoản nhân sự thành công!');
 END;
 $$;
+
+-- Explicitly deny anonymous invocation of SECURITY DEFINER account functions.
+REVOKE ALL ON FUNCTION public.rpc_create_user(text,text,text,text,uuid,text) FROM PUBLIC, anon;
+REVOKE ALL ON FUNCTION public.rpc_update_user(uuid,text,text,uuid,text,boolean) FROM PUBLIC, anon;
+REVOKE ALL ON FUNCTION public.rpc_delete_user(uuid) FROM PUBLIC, anon;
+GRANT EXECUTE ON FUNCTION public.rpc_create_user(text,text,text,text,uuid,text) TO authenticated;
+GRANT EXECUTE ON FUNCTION public.rpc_update_user(uuid,text,text,uuid,text,boolean) TO authenticated;
+GRANT EXECUTE ON FUNCTION public.rpc_delete_user(uuid) TO authenticated;

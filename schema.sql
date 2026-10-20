@@ -521,7 +521,7 @@ $$;
 
 -- Tạo bucket lưu ảnh minh chứng (nếu chưa có)
 INSERT INTO storage.buckets (id, name, public)
-VALUES ('attendance_proofs', 'attendance_proofs', true)
+VALUES ('attendance_proofs', 'attendance_proofs', false)
 ON CONFLICT (id) DO NOTHING;
 
 -- Cho phép người dùng đăng nhập tải ảnh lên
@@ -535,137 +535,13 @@ WITH CHECK (bucket_id = 'attendance_proofs');
 DROP POLICY IF EXISTS "Public read for attendance proofs" ON storage.objects;
 CREATE POLICY "Public read for attendance proofs"
 ON storage.objects FOR SELECT
-TO public
-USING (bucket_id = 'attendance_proofs');
+TO authenticated
+USING (bucket_id = 'attendance_proofs' AND (storage.foldername(name))[1] = auth.uid()::text);
 
 -- ==============================================================================
--- 7. KHỞI TẠO TÀI KHOẢN ADMIN MẶC ĐỊNH (SEED DATA)
--- Tài khoản: admin (hoặc admin@nhathuoc.com)
--- Mật khẩu: Cuong@123
--- ==============================================================================
+-- Bootstrap the first administrator manually through Supabase Auth and a trusted
+-- SQL session. Never ship a shared password. See README.md.
 
-DO $$
-DECLARE
-    v_admin_id UUID := gen_random_uuid();
-    v_encrypted_pw TEXT;
-BEGIN
-    -- Tạo mật khẩu mã hóa bcrypt cho Cuong@123
-    v_encrypted_pw := crypt('Cuong@123', gen_salt('bf'));
-
-    -- 7.1. Tạo tài khoản trong auth.users nếu chưa tồn tại
-    IF NOT EXISTS (SELECT 1 FROM auth.users WHERE email = 'admin@nhathuoc.com') THEN
-        INSERT INTO auth.users (
-            instance_id,
-            id,
-            aud,
-            role,
-            email,
-            encrypted_password,
-            email_confirmed_at,
-            raw_app_meta_data,
-            raw_user_meta_data,
-            created_at,
-            updated_at,
-            confirmation_token,
-            recovery_token,
-            email_change_token_new,
-            email_change,
-            email_change_token_current,
-            phone_change,
-            phone_change_token,
-            reauthentication_token,
-            is_super_admin
-        )
-        VALUES (
-            '00000000-0000-0000-0000-000000000000',
-            v_admin_id,
-            'authenticated',
-            'authenticated',
-            'admin@nhathuoc.com',
-            v_encrypted_pw,
-            timezone('Asia/Ho_Chi_Minh', now()),
-            '{"provider":"email","providers":["email"]}',
-            '{"full_name":"Chủ Nhà Thuốc (Admin)"}',
-            timezone('Asia/Ho_Chi_Minh', now()),
-            timezone('Asia/Ho_Chi_Minh', now()),
-            '', '', '', '', '', '', '', '', FALSE
-        );
-
-        -- 7.2. Tạo profile admin tương ứng
-        INSERT INTO public.profiles (
-            id,
-            branch_id,
-            full_name,
-            role,
-            phone,
-            is_active
-        )
-        VALUES (
-            v_admin_id,
-            NULL, -- Admin quản lý toàn chuỗi
-            'Chủ Nhà Thuốc (Admin)',
-            'admin',
-            '0900000000',
-            TRUE
-        )
-        ON CONFLICT (id) DO UPDATE 
-        SET role = 'admin', is_active = TRUE;
-
-        -- 7.3. Tạo bản ghi identity để Supabase Auth GoTrue xác thực
-        BEGIN
-            INSERT INTO auth.identities (
-                id,
-                user_id,
-                identity_data,
-                provider,
-                provider_id,
-                last_sign_in_at,
-                created_at,
-                updated_at
-            )
-            VALUES (
-                v_admin_id::text,
-                v_admin_id,
-                jsonb_build_object('sub', v_admin_id::text, 'email', 'admin@nhathuoc.com'),
-                'email',
-                v_admin_id::text,
-                timezone('Asia/Ho_Chi_Minh', now()),
-                timezone('Asia/Ho_Chi_Minh', now()),
-                timezone('Asia/Ho_Chi_Minh', now())
-            );
-        EXCEPTION WHEN OTHERS THEN
-            NULL;
-        END;
-    ELSE
-        -- Nếu đã có email admin@nhathuoc.com, cập nhật lại mật khẩu và profile
-        UPDATE auth.users 
-        SET encrypted_password = v_encrypted_pw, 
-            email_confirmed_at = COALESCE(email_confirmed_at, now()),
-            updated_at = now()
-        WHERE email = 'admin@nhathuoc.com';
-
-        UPDATE public.profiles
-        SET role = 'admin', is_active = TRUE
-        WHERE id = (SELECT id FROM auth.users WHERE email = 'admin@nhathuoc.com');
-    END IF;
-
-    -- KHẮC PHỤC TRIỆT ĐỂ LỖI 'Database error querying schema' của GoTrue:
-    -- Supabase GoTrue quét qua struct string, nếu gặp NULL sẽ ném lỗi 500.
-    -- Bắt buộc chuyển các cột token bị NULL thành chuỗi rỗng ''
-    UPDATE auth.users
-    SET confirmation_token = COALESCE(confirmation_token, ''),
-        recovery_token = COALESCE(recovery_token, ''),
-        email_change = COALESCE(email_change, ''),
-        email_change_token_new = COALESCE(email_change_token_new, ''),
-        email_change_token_current = COALESCE(email_change_token_current, ''),
-        phone_change = COALESCE(phone_change, ''),
-        phone_change_token = COALESCE(phone_change_token, ''),
-        reauthentication_token = COALESCE(reauthentication_token, ''),
-        is_super_admin = COALESCE(is_super_admin, FALSE);
-END;
-$$;
-
--- ==============================================================================
 -- 8. RPC: QUẢN TRỊ NHÂN VIÊN & RÀNG BUỘC PHÂN QUYỀN (ADMIN ONLY)
 -- - Chỉ duy nhất 1 tài khoản Admin
 -- - Mỗi chi nhánh chỉ được tối đa 1 Store Manager
@@ -692,8 +568,8 @@ DECLARE
     v_existing_sm RECORD;
 BEGIN
     -- Chỉ Admin mới được quyền tạo tài khoản
-    SELECT role INTO v_caller_role FROM public.profiles WHERE id = auth.uid();
-    IF v_caller_role != 'admin' THEN
+    SELECT role INTO v_caller_role FROM public.profiles WHERE id = auth.uid() AND is_active IS TRUE;
+    IF v_caller_role IS DISTINCT FROM 'admin' THEN
         RAISE EXCEPTION 'Chỉ có Chủ chuỗi (Admin) mới có quyền tạo tài khoản nhân viên mới!';
     END IF;
 
@@ -834,8 +710,8 @@ DECLARE
     v_old_role TEXT;
     v_existing_sm RECORD;
 BEGIN
-    SELECT role INTO v_caller_role FROM public.profiles WHERE id = auth.uid();
-    IF v_caller_role != 'admin' THEN
+    SELECT role INTO v_caller_role FROM public.profiles WHERE id = auth.uid() AND is_active IS TRUE;
+    IF v_caller_role IS DISTINCT FROM 'admin' THEN
         RAISE EXCEPTION 'Chỉ có Admin mới có quyền cập nhật phân quyền nhân sự!';
     END IF;
 
@@ -889,8 +765,8 @@ DECLARE
     v_caller_role TEXT;
     v_target_role TEXT;
 BEGIN
-    SELECT role INTO v_caller_role FROM public.profiles WHERE id = auth.uid();
-    IF v_caller_role != 'admin' THEN
+    SELECT role INTO v_caller_role FROM public.profiles WHERE id = auth.uid() AND is_active IS TRUE;
+    IF v_caller_role IS DISTINCT FROM 'admin' THEN
         RAISE EXCEPTION 'Chỉ có Admin mới có quyền xóa tài khoản nhân viên!';
     END IF;
 

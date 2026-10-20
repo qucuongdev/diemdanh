@@ -1,336 +1,184 @@
-import webbrowser
-from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QFrame, QTabWidget, QScrollArea, QMessageBox
-)
-from PySide6.QtCore import Qt
-from core.supabase_service import SupabaseService
-from core.qt_worker import QtWorker
+from PySide6.QtCore import QUrl
+from PySide6.QtGui import QDesktopServices
+from PySide6.QtWidgets import QHBoxLayout, QComboBox, QMessageBox
+from views_qt.common import Page, TableModel, table_for, button
 
-class ApprovalView(QWidget):
+STATUS = {"pending": "Chờ duyệt", "approved": "Đã duyệt", "rejected": "Đã từ chối"}
+
+
+class ApprovalView(Page):
+    PAGE_SIZE = 50
+
     def __init__(self, parent=None, current_profile=None):
-        super().__init__(parent)
-        self.current_profile = current_profile or {}
-        self.supabase = SupabaseService()
-        self.branch_id = self.current_profile.get("branch_id")
-        self.user_role = self.current_profile.get("role", "storemanager")
-        self.worker_leave = None
-        self.worker_proof = None
+        super().__init__(parent, current_profile)
+        self.offset = 0
+        self.busy = False
+        self.heading("Duyệt yêu cầu", "Chọn một yêu cầu để xem lý do, ảnh minh chứng và xử lý.")
+        controls = QHBoxLayout()
+        self.kind = QComboBox()
+        self.kind.addItem("Đơn xin nghỉ", "leave")
+        self.kind.addItem("Giải trình chấm công", "proof")
+        self.state = QComboBox()
+        for value, caption in STATUS.items():
+            self.state.addItem(caption, value)
+        controls.addWidget(self.kind)
+        controls.addWidget(self.state)
+        self.refresh_btn = button("Làm mới", self.reset)
+        controls.addWidget(self.refresh_btn)
+        controls.addStretch()
+        self.root.addLayout(controls)
+        self.model = TableModel(
+            [
+                ("Nhân viên", lambda r: (r.get("profiles") or {}).get("full_name")),
+                ("Chi nhánh", lambda r: (r.get("branches") or {}).get("name")),
+                (
+                    "Ngày ca",
+                    lambda r: (
+                        (r.get("schedules") or {}).get("work_date") or str(r.get("created_at", ""))[:10]
+                    ),
+                ),
+                ("Nội dung", lambda r: r.get("reason") or r.get("note")),
+                ("Trạng thái", lambda r: STATUS.get(r.get("status"), "Không rõ")),
+            ],
+            self,
+        )
+        self.table = table_for(self.model)
+        self.root.addWidget(self.table, 1)
+        self.root.addWidget(self.status)
+        footer = QHBoxLayout()
+        self.prev_btn = button("Trang trước", lambda: self.move(-1))
+        self.next_btn = button("Trang sau", lambda: self.move(1))
+        self.details_btn = button("Xem chi tiết", self.details)
+        self.image_btn = button("Xem ảnh", self.open_image)
+        self.reject_btn = button("Từ chối", lambda: self.review("rejected"))
+        self.approve_btn = button("Phê duyệt", lambda: self.review("approved"), True)
+        for widget in [
+            self.prev_btn,
+            self.next_btn,
+            self.details_btn,
+            self.image_btn,
+            self.reject_btn,
+            self.approve_btn,
+        ]:
+            footer.addWidget(widget)
+        self.root.addLayout(footer)
+        self.kind.currentIndexChanged.connect(self.reset)
+        self.state.currentIndexChanged.connect(self.reset)
+        self.table.selectionModel().selectionChanged.connect(self.selection_changed)
+        self.selection_changed()
+        self.reset()
 
-        self.setup_ui()
-        self.refresh_all()
+    def reset(self, *_):
+        self.tasks.cancel("image")
+        self.offset = 0
+        self.load_data()
 
-    def setup_ui(self):
-        root_layout = QVBoxLayout(self)
-        root_layout.setContentsMargins(20, 20, 20, 20)
-        root_layout.setSpacing(15)
+    def move(self, direction):
+        self.offset = max(0, self.offset + direction * self.PAGE_SIZE)
+        self.load_data()
 
-        # 1. Header
-        header = QFrame()
-        header.setFixedHeight(60)
-        header.setStyleSheet("background-color: #242424; border: 1px solid #333333; border-radius: 12px;")
-        h_layout = QHBoxLayout(header)
-        h_layout.setContentsMargins(20, 10, 20, 10)
+    def load_data(self):
+        if self.current_profile.get("role") not in ("admin", "storemanager"):
+            self.error("Bạn không có quyền duyệt yêu cầu.")
+            return
+        branch = None if self.current_profile["role"] == "admin" else self.current_profile["branch_id"]
+        kind, status, offset = self.kind.currentData(), self.state.currentData(), self.offset
+        method = self.supabase.get_leave_requests if kind == "leave" else self.supabase.get_attendance_proofs
+        self.status.setText("Đang tải yêu cầu…")
+        self.busy = True
+        self.selection_changed()
+        self.prev_btn.setEnabled(False)
+        self.next_btn.setEnabled(False)
 
-        lbl_title = QLabel("📋 TRUNG TÂM PHÊ DUYỆT YÊU CẦU")
-        lbl_title.setStyleSheet("font-size: 16px; font-weight: bold; color: #FFFFFF; border: none;")
-        h_layout.addWidget(lbl_title)
+        def done(records):
+            self.busy = False
+            self.model.replace(records[: self.PAGE_SIZE])
+            self.prev_btn.setEnabled(offset > 0)
+            self.next_btn.setEnabled(len(records) > self.PAGE_SIZE)
+            self.status.setText(
+                f"Trang {offset // self.PAGE_SIZE + 1} · {min(len(records), self.PAGE_SIZE)} yêu cầu"
+                if records
+                else "Không có yêu cầu phù hợp."
+            )
+            self.selection_changed()
 
-        h_layout.addStretch()
+        def failed(message):
+            self.busy = False
+            self.model.replace([])
+            self.prev_btn.setEnabled(offset > 0)
+            self.error(message)
+            self.selection_changed()
 
-        btn_refresh = QPushButton("🔄 Làm mới")
-        btn_refresh.setFixedSize(100, 34)
-        btn_refresh.setStyleSheet("""
-            QPushButton {
-                background-color: #333333; color: white; font-weight: bold;
-                border-radius: 6px; border: none; font-size: 13px;
-            }
-            QPushButton:hover { background-color: #444444; }
-        """)
-        btn_refresh.clicked.connect(self.refresh_all)
-        h_layout.addWidget(btn_refresh)
+        self.tasks.submit(
+            "list",
+            lambda: method(branch_id=branch, status=status, limit=self.PAGE_SIZE + 1, offset=offset),
+            done,
+            failed,
+        )
 
-        root_layout.addWidget(header)
+    def selection_changed(self, *_):
+        record = self.selected(self.table)
+        actionable = bool(record) and record.get("status") == "pending" and not self.busy
+        self.approve_btn.setEnabled(actionable)
+        self.reject_btn.setEnabled(actionable)
+        self.details_btn.setEnabled(bool(record) and not self.busy)
+        self.image_btn.setEnabled(bool(record) and self.kind.currentData() == "proof" and not self.busy)
 
-        # 2. Tab Widget
-        self.tab_widget = QTabWidget()
-        self.tab_widget.setStyleSheet("""
-            QTabWidget::pane {
-                border: 1px solid #333333;
-                background-color: #242424;
-                border-radius: 12px;
-            }
-        """)
+    def details(self):
+        record = self.selected(self.table)
+        if record:
+            box = QMessageBox(self)
+            box.setWindowTitle("Chi tiết yêu cầu")
+            from PySide6.QtCore import Qt
 
-        # Tab 1: Đơn xin nghỉ phép
-        self.tab_leave = QWidget()
-        tl_layout = QVBoxLayout(self.tab_leave)
-        tl_layout.setContentsMargins(10, 10, 10, 10)
+            box.setTextFormat(Qt.TextFormat.PlainText)
+            box.setText(record.get("reason") or record.get("note") or "Không có nội dung.")
+            box.exec()
 
-        self.scroll_leave = QScrollArea()
-        self.scroll_leave.setWidgetResizable(True)
-        self.content_leave = QWidget()
-        self.layout_leave = QVBoxLayout(self.content_leave)
-        self.layout_leave.setSpacing(8)
-        self.scroll_leave.setWidget(self.content_leave)
-        tl_layout.addWidget(self.scroll_leave)
+    def review(self, status):
+        record = self.selected(self.table)
+        if self.busy or not record or record.get("status") != "pending":
+            return
+        kind = self.kind.currentData()
+        method = (
+            self.supabase.review_leave_request if kind == "leave" else self.supabase.review_attendance_proof
+        )
+        record_id, reviewer = record["id"], self.current_profile["id"]
+        self.busy = True
+        self.selection_changed()
+        for control in [self.kind, self.state, self.refresh_btn, self.prev_btn, self.next_btn]:
+            control.setEnabled(False)
 
-        self.tab_widget.addTab(self.tab_leave, "Đơn xin nghỉ phép")
-
-        # Tab 2: Giải trình quên chấm công
-        self.tab_proof = QWidget()
-        tp_layout = QVBoxLayout(self.tab_proof)
-        tp_layout.setContentsMargins(10, 10, 10, 10)
-
-        self.scroll_proof = QScrollArea()
-        self.scroll_proof.setWidgetResizable(True)
-        self.content_proof = QWidget()
-        self.layout_proof = QVBoxLayout(self.content_proof)
-        self.layout_proof.setSpacing(8)
-        self.scroll_proof.setWidget(self.content_proof)
-        tp_layout.addWidget(self.scroll_proof)
-
-        self.tab_widget.addTab(self.tab_proof, "Giải trình quên chấm công (Kèm ảnh)")
-
-        root_layout.addWidget(self.tab_widget)
-
-    def refresh_all(self):
-        self.load_leave_requests()
-        self.load_attendance_proofs()
-
-    # ================= TAB 1: DUYỆT ĐƠN NGHỈ =================
-    def load_leave_requests(self):
-        while self.layout_leave.count():
-            item = self.layout_leave.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
-
-        lbl_loading = QLabel("⏳ Đang tải danh sách đơn xin nghỉ...")
-        lbl_loading.setStyleSheet("font-size: 13px; color: gray; padding: 40px;")
-        lbl_loading.setAlignment(Qt.AlignCenter)
-        self.layout_leave.addWidget(lbl_loading)
-
-        b_id = self.branch_id if self.user_role != "admin" else None
-
-        def fetch():
-            return self.supabase.get_leave_requests(branch_id=b_id)
-
-        def on_done(requests):
-            while self.layout_leave.count():
-                item = self.layout_leave.takeAt(0)
-                if item.widget():
-                    item.widget().deleteLater()
-
-            if not requests:
-                lbl = QLabel("Không có đơn xin nghỉ nào cần duyệt.")
-                lbl.setStyleSheet("font-size: 13px; color: gray; padding: 40px;")
-                lbl.setAlignment(Qt.AlignCenter)
-                self.layout_leave.addWidget(lbl)
+        def done(result):
+            self.busy = False
+            for control in [self.kind, self.state, self.refresh_btn]:
+                control.setEnabled(True)
+            if not result.get("success"):
+                self.error(result.get("message", "Không thể duyệt yêu cầu."))
+                self.selection_changed()
+                self.prev_btn.setEnabled(self.offset > 0)
                 return
+            self.load_data()
 
-            for req in requests:
-                card = self._create_leave_card(req)
-                self.layout_leave.addWidget(card)
+        def failed(message):
+            done({"success": False, "message": message})
 
-            self.layout_leave.addStretch()
+        self.tasks.submit("review", lambda: method(record_id, status, reviewer), done, failed, replace=False)
 
-        self.worker_leave = QtWorker(fetch)
-        self.worker_leave.result_ready.connect(on_done)
-        self.worker_leave.start()
+    def open_image(self):
+        record = self.selected(self.table)
+        if not record:
+            return
+        path = record.get("image_url")
+        self.image_btn.setEnabled(False)
 
-    def _create_leave_card(self, req):
-        card = QFrame()
-        card.setStyleSheet("background-color: #242424; border: 1px solid #333333; border-radius: 10px; padding: 12px;")
-        c_layout = QVBoxLayout(card)
-        c_layout.setSpacing(8)
+        def done(url):
+            self.selection_changed()
+            if not url or not QDesktopServices.openUrl(QUrl(url)):
+                self.error("Không thể mở ảnh minh chứng.")
 
-        staff_name = req.get("profiles", {}).get("full_name", "Nhân viên")
-        branch_name = req.get("branches", {}).get("name", "")
-        leave_type = req.get("leave_type", "")
-        reason = req.get("reason", "")
-        status = req.get("status", "pending")
-        schedule = req.get("schedules", {})
-        work_date = schedule.get("work_date", "")
-        shift_info = schedule.get("shifts", {})
-        shift_name = shift_info.get("name", "Ca làm")
+        def failed(message):
+            self.selection_changed()
+            self.error(message)
 
-        type_map = {
-            "sick": "Nghỉ ốm",
-            "annual": "Phép năm",
-            "unpaid": "Việc riêng không lương",
-            "swap": "Xin đổi ca"
-        }
-        type_str = type_map.get(leave_type, leave_type)
-
-        lbl_t = QLabel(f"👤 {staff_name}  •  🏥 {branch_name}  •  Loại: {type_str}")
-        lbl_t.setStyleSheet("font-size: 14px; font-weight: bold; color: #FFFFFF; border: none;")
-        c_layout.addWidget(lbl_t)
-
-        lbl_info = QLabel(f"📅 Ngày nghỉ: {work_date} ({shift_name})\n💬 Lý do: {reason}")
-        lbl_info.setStyleSheet("font-size: 12px; color: #CCCCCC; border: none;")
-        c_layout.addWidget(lbl_info)
-
-        act_box = QWidget()
-        act_box.setStyleSheet("border: none;")
-        a_layout = QHBoxLayout(act_box)
-        a_layout.setContentsMargins(0, 4, 0, 0)
-        a_layout.addStretch()
-
-        if status == "pending":
-            btn_app = QPushButton("✅ Phê duyệt")
-            btn_app.setFixedSize(110, 32)
-            btn_app.setStyleSheet("background-color: #28A745; color: white; font-weight: bold; border-radius: 6px;")
-            btn_app.clicked.connect(lambda: self.handle_review_leave(req, "approved"))
-            a_layout.addWidget(btn_app)
-
-            btn_rej = QPushButton("❌ Từ chối")
-            btn_rej.setFixedSize(100, 32)
-            btn_rej.setStyleSheet("background-color: #DC3545; color: white; font-weight: bold; border-radius: 6px;")
-            btn_rej.clicked.connect(lambda: self.handle_review_leave(req, "rejected"))
-            a_layout.addWidget(btn_rej)
-        else:
-            st_col = "#28A745" if status == "approved" else "#DC3545"
-            st_txt = "ĐÃ DUYỆT" if status == "approved" else "ĐÃ TỪ CHỐI"
-            badge = QLabel(st_txt)
-            badge.setStyleSheet(f"color: {st_col}; font-weight: bold; font-size: 13px;")
-            a_layout.addWidget(badge)
-
-        c_layout.addWidget(act_box)
-        return card
-
-    def handle_review_leave(self, req, status):
-        reviewer_id = self.current_profile.get("id")
-        req_id = req.get("id")
-
-        def worker():
-            return self.supabase.review_leave_request(req_id, status, reviewer_id)
-
-        def on_done(res):
-            if res.get("success"):
-                action_name = "phê duyệt" if status == "approved" else "từ chối"
-                QMessageBox.information(self, "Thành công", f"Đã {action_name} đơn xin nghỉ!")
-                self.load_leave_requests()
-            else:
-                QMessageBox.critical(self, "Thông báo", res.get("message", "Không thể cập nhật trạng thái đơn."))
-
-        w = QtWorker(worker)
-        w.result_ready.connect(on_done)
-        w.start()
-        # Lưu reference để không bị GC thu hồi
-        self._temp_worker = w
-
-    # ================= TAB 2: DUYỆT MINH CHỨNG & ẢNH =================
-    def load_attendance_proofs(self):
-        while self.layout_proof.count():
-            item = self.layout_proof.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
-
-        lbl_loading = QLabel("⏳ Đang tải danh sách minh chứng quên chấm công...")
-        lbl_loading.setStyleSheet("font-size: 13px; color: gray; padding: 40px;")
-        lbl_loading.setAlignment(Qt.AlignCenter)
-        self.layout_proof.addWidget(lbl_loading)
-
-        b_id = self.branch_id if self.user_role != "admin" else None
-
-        def fetch():
-            return self.supabase.get_attendance_proofs(branch_id=b_id)
-
-        def on_done(proofs):
-            while self.layout_proof.count():
-                item = self.layout_proof.takeAt(0)
-                if item.widget():
-                    item.widget().deleteLater()
-
-            if not proofs:
-                lbl = QLabel("Không có giải trình quên chấm công nào cần duyệt.")
-                lbl.setStyleSheet("font-size: 13px; color: gray; padding: 40px;")
-                lbl.setAlignment(Qt.AlignCenter)
-                self.layout_proof.addWidget(lbl)
-                return
-
-            for p in proofs:
-                card = self._create_proof_card(p)
-                self.layout_proof.addWidget(card)
-
-            self.layout_proof.addStretch()
-
-        self.worker_proof = QtWorker(fetch)
-        self.worker_proof.result_ready.connect(on_done)
-        self.worker_proof.start()
-
-    def _create_proof_card(self, p):
-        card = QFrame()
-        card.setStyleSheet("background-color: #242424; border: 1px solid #333333; border-radius: 10px; padding: 12px;")
-        c_layout = QVBoxLayout(card)
-        c_layout.setSpacing(8)
-
-        staff_name = p.get("profiles", {}).get("full_name", "Nhân viên")
-        branch_name = p.get("branches", {}).get("name", "")
-        image_url = p.get("image_url", "")
-        note = p.get("note", "Không có ghi chú")
-        created_at = p.get("created_at", "")[:19].replace("T", " ")
-        status = p.get("status", "pending")
-
-        lbl_t = QLabel(f"👤 {staff_name}  •  🏥 {branch_name}  •  Thời gian gửi: {created_at}")
-        lbl_t.setStyleSheet("font-size: 14px; font-weight: bold; color: #FFFFFF; border: none;")
-        c_layout.addWidget(lbl_t)
-
-        lbl_note = QLabel(f"💬 Giải trình: {note}")
-        lbl_note.setStyleSheet("font-size: 12px; color: #CCCCCC; border: none;")
-        c_layout.addWidget(lbl_note)
-
-        act_box = QWidget()
-        act_box.setStyleSheet("border: none;")
-        a_layout = QHBoxLayout(act_box)
-        a_layout.setContentsMargins(0, 4, 0, 0)
-
-        btn_view_img = QPushButton("🖼️ Xem ảnh bằng chứng")
-        btn_view_img.setFixedSize(160, 32)
-        btn_view_img.setStyleSheet("background-color: #1F6AA5; color: white; font-weight: bold; border-radius: 6px;")
-        btn_view_img.clicked.connect(lambda: webbrowser.open(image_url))
-        a_layout.addWidget(btn_view_img)
-
-        a_layout.addStretch()
-
-        if status == "pending":
-            btn_app = QPushButton("✅ Duyệt công")
-            btn_app.setFixedSize(110, 32)
-            btn_app.setStyleSheet("background-color: #28A745; color: white; font-weight: bold; border-radius: 6px;")
-            btn_app.clicked.connect(lambda: self.handle_review_proof(p, "approved"))
-            a_layout.addWidget(btn_app)
-
-            btn_rej = QPushButton("❌ Từ chối")
-            btn_rej.setFixedSize(100, 32)
-            btn_rej.setStyleSheet("background-color: #DC3545; color: white; font-weight: bold; border-radius: 6px;")
-            btn_rej.clicked.connect(lambda: self.handle_review_proof(p, "rejected"))
-            a_layout.addWidget(btn_rej)
-        else:
-            st_col = "#28A745" if status == "approved" else "#DC3545"
-            st_txt = "ĐÃ DUYỆT" if status == "approved" else "ĐÃ TỪ CHỐI"
-            badge = QLabel(st_txt)
-            badge.setStyleSheet(f"color: {st_col}; font-weight: bold; font-size: 13px;")
-            a_layout.addWidget(badge)
-
-        c_layout.addWidget(act_box)
-        return card
-
-    def handle_review_proof(self, p, status):
-        reviewer_id = self.current_profile.get("id")
-        proof_id = p.get("id")
-
-        def worker():
-            return self.supabase.review_attendance_proof(proof_id, status, reviewer_id)
-
-        def on_done(res):
-            if res.get("success"):
-                action_name = "duyệt" if status == "approved" else "từ chối"
-                QMessageBox.information(self, "Thành công", f"Đã {action_name} minh chứng!")
-                self.load_attendance_proofs()
-            else:
-                QMessageBox.critical(self, "Thông báo", res.get("message", "Không thể cập nhật trạng thái minh chứng."))
-
-        w = QtWorker(worker)
-        w.result_ready.connect(on_done)
-        w.start()
-        self._temp_worker = w
+        self.tasks.submit("image", lambda: self.supabase.get_proof_url(path), done, failed)

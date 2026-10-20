@@ -1,223 +1,200 @@
+"""Supported PySide6 application entry point."""
+
 import sys
-import customtkinter as ctk
+from PySide6.QtCore import QTimer
+from PySide6.QtWidgets import QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QStackedWidget
 from core.config import APP_NAME, APP_VERSION
+from core.domain import ROLES, validate_profile
+from core.qt_worker import QtWorker, TaskRunner
 from core.supabase_service import SupabaseService
-from views.login_view import LoginView
-from views.attendance_view import AttendanceView
-from views.schedule_view import ScheduleView
-from views.approval_view import ApprovalView
-from views.report_view import ReportView
-from views.settings_view import SettingsView
+from views_qt.common import label, button
+from views_qt.qt_theme import configure_application
+from views_qt.login_view import LoginView
 
-# Cấu hình giao diện CustomTkinter
-ctk.set_appearance_mode("System")  # "Dark", "Light", "System"
-ctk.set_default_color_theme("blue")  # Themes: "blue", "green", "dark-blue"
 
-class App(ctk.CTk):
+class MainAppWidget(QWidget):
+    def __init__(self, parent=None, on_logout=None):
+        super().__init__(parent)
+        self.on_logout = on_logout
+        self.views, self.nav_buttons = {}, {}
+        self.current_profile = None
+        self.active_nav_key = None
+        root = QHBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+        sidebar = QWidget()
+        sidebar.setObjectName("Sidebar")
+        sidebar.setFixedWidth(210)
+        layout = QVBoxLayout(sidebar)
+        layout.setContentsMargins(16, 28, 16, 20)
+        logo = label("NHÀ THUỐC")
+        logo.setObjectName("SidebarLogo")
+        layout.addWidget(logo)
+        layout.addWidget(label("Quản lý chấm công"))
+        self.role_badge = label()
+        layout.addWidget(self.role_badge)
+        layout.addSpacing(28)
+        self.menu_layout = QVBoxLayout()
+        layout.addLayout(self.menu_layout)
+        layout.addStretch()
+        layout.addWidget(button("Đăng xuất", self.handle_logout))
+        root.addWidget(sidebar)
+        self.content_stack = QStackedWidget()
+        root.addWidget(self.content_stack, 1)
+
+    def clear_session(self):
+        for runner in self.findChildren(TaskRunner):
+            runner.invalidate()
+        for btn in self.nav_buttons.values():
+            self.menu_layout.removeWidget(btn)
+            btn.deleteLater()
+        self.nav_buttons.clear()
+        while self.content_stack.count():
+            widget = self.content_stack.widget(0)
+            self.content_stack.removeWidget(widget)
+            widget.deleteLater()
+        self.views.clear()
+        self.current_profile = None
+        self.active_nav_key = None
+
+    def configure_user(self, profile):
+        validate_profile(profile)
+        self.clear_session()
+        self.current_profile = profile
+        role = profile["role"]
+        self.role_badge.setText(ROLES[role])
+        items = [("attendance", "Điểm danh"), ("schedule", "Lịch làm việc")]
+        if role in ("admin", "storemanager"):
+            items += [("approval", "Duyệt yêu cầu"), ("reports", "Báo cáo")]
+        if role == "admin":
+            items += [("settings", "Quản trị")]
+        for key, text in items:
+            btn = button(text, lambda checked=False, key=key: self.show_view(key))
+            self.menu_layout.addWidget(btn)
+            self.nav_buttons[key] = btn
+        self.show_view("attendance")
+
+    def show_view(self, key):
+        # Guard direct calls as well as visible navigation.
+        if key not in self.nav_buttons:
+            return
+        if key not in self.views:
+            if key == "attendance":
+                from views_qt.attendance_view import AttendanceView
+
+                view = AttendanceView(self, self.current_profile)
+            elif key == "schedule":
+                from views_qt.schedule_view import ScheduleView
+
+                view = ScheduleView(self, self.current_profile)
+            elif key == "approval":
+                from views_qt.approval_view import ApprovalView
+
+                view = ApprovalView(self, self.current_profile)
+            elif key == "reports":
+                from views_qt.report_view import ReportView
+
+                view = ReportView(self, self.current_profile)
+            else:
+                from views_qt.settings_view import SettingsView
+
+                view = SettingsView(self, self.current_profile)
+            self.views[key] = view
+            self.content_stack.addWidget(view)
+        self.content_stack.setCurrentWidget(self.views[key])
+        self.active_nav_key = key
+        for name, btn in self.nav_buttons.items():
+            btn.setProperty("active", name == key)
+            btn.style().unpolish(btn)
+            btn.style().polish(btn)
+        if hasattr(self.views[key], "on_show"):
+            self.views[key].on_show()
+
+    def handle_logout(self):
+        if self.on_logout:
+            self.on_logout()
+
+
+class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-
-        self.title(f"{APP_NAME} - v{APP_VERSION}")
-        self.geometry("1280x820")
-        self.minsize(1100, 700)
-
+        self.setWindowTitle(f"{APP_NAME} · {APP_VERSION}")
+        self.resize(1280, 820)
+        self.setMinimumSize(1000, 680)
         self.supabase = SupabaseService()
+        self.tasks = TaskRunner(self)
         self.current_profile = None
-
-        # Container chính để chuyển đổi Single-Frame
-        self.container = ctk.CTkFrame(self, fg_color="transparent")
-        self.container.pack(fill="both", expand=True)
-
-        # Khung ứng dụng sau khi đăng nhập (Bao gồm Sidebar + Main Content)
-        self.main_app_frame = None
-        self.sidebar_frame = None
-        self.view_container = None
-        self.current_view = None
-        self.views = {}  # Cache các views để chuyển đổi tức thì (0ms lag)
-
-        # Bắt đầu với Màn hình Đăng nhập
-        self.show_login_view()
-
-    def show_login_view(self):
-        self.clear_container()
-        self.current_profile = None
-        self.views = {}
-        login_view = LoginView(self.container, on_login_success=self.on_login_success)
-        login_view.pack(fill="both", expand=True)
+        self._closing = False
+        self._logging_out = False
+        self._allow_close = False
+        self.root_stack = QStackedWidget()
+        self.setCentralWidget(self.root_stack)
+        self.login_view = LoginView(self)
+        self.login_view.login_success.connect(self.on_login_success)
+        self.root_stack.addWidget(self.login_view)
+        self.main_app_widget = MainAppWidget(self, on_logout=self.show_login_view)
+        self.root_stack.addWidget(self.main_app_widget)
+        self._drain_timer = QTimer(self)
+        self._drain_timer.setInterval(50)
+        self._drain_timer.timeout.connect(self._drain)
 
     def on_login_success(self, profile):
+        try:
+            validate_profile(profile)
+        except ValueError as exc:
+            self.login_view._on_auth_error(str(exc))
+            self.show_login_view()
+            return
         self.current_profile = profile
-        self.views = {}
-        self.setup_main_layout()
-        self.show_view("attendance")
+        self.main_app_widget.configure_user(profile)
+        self.root_stack.setCurrentIndex(1)
 
-    def setup_main_layout(self):
-        self.clear_container()
+    def show_login_view(self):
+        if self._logging_out:
+            return
+        self._logging_out = True
+        self.current_profile = None
+        self.main_app_widget.clear_session()
+        self.setEnabled(False)
+        self._drain_timer.start()
 
-        # Layout 2 cột: Sidebar trái (230px) + View Container phải
-        self.main_app_frame = ctk.CTkFrame(self.container, fg_color="transparent")
-        self.main_app_frame.pack(fill="both", expand=True)
+    def _drain(self):
+        if QtWorker.busy():
+            return
+        self._drain_timer.stop()
+        self.tasks.submit("logout", self.supabase.logout, self._logged_out, self._logged_out, replace=False)
 
-        self.sidebar_frame = ctk.CTkFrame(self.main_app_frame, width=230, corner_radius=0)
-        self.sidebar_frame.pack(side="left", fill="y", padx=0, pady=0)
-        self.sidebar_frame.pack_propagate(False)
+    def _logged_out(self, _result=None):
+        self._logging_out = False
+        if self._closing:
+            self._allow_close = True
+            self.close()
+        else:
+            self.login_view.pass_entry.clear()
+            self.login_view.error_label.clear()
+            self.root_stack.setCurrentIndex(0)
+            self.setEnabled(True)
+            self.login_view.email_entry.setFocus()
 
-        # Logo / Title
-        self.logo_label = ctk.CTkLabel(
-            self.sidebar_frame, 
-            text="💊 NHÀ THUỐC", 
-            font=ctk.CTkFont(size=18, weight="bold")
-        )
-        self.logo_label.pack(pady=(25, 15), padx=20)
+    def closeEvent(self, event):
+        if self._allow_close:
+            event.accept()
+            return
+        event.ignore()
+        self._closing = True
+        self.login_view.tasks.invalidate()
+        self.show_login_view()
 
-        # Role Badge
-        role = self.current_profile.get("role", "staff")
-        role_label = {
-            "admin": "👑 CHỦ CHUỖI",
-            "storemanager": "👔 CỬA HÀNG TRƯỞNG",
-            "staff": "💊 DƯỢC SĨ"
-        }.get(role, role.upper())
 
-        self.role_badge = ctk.CTkLabel(
-            self.sidebar_frame, 
-            text=role_label, 
-            font=ctk.CTkFont(size=11, weight="bold"),
-            fg_color=("#E5F2FF", "#18324F"),
-            corner_radius=6,
-            height=28
-        )
-        self.role_badge.pack(fill="x", padx=20, pady=(0, 20))
+def main():
+    app = QApplication(sys.argv)
+    configure_application(app)
+    app.setApplicationName(APP_NAME)
+    app.setApplicationVersion(APP_VERSION)
+    window = MainWindow()
+    window.show()
+    return app.exec()
 
-        # Menu buttons
-        self.nav_buttons = {}
-
-        self.add_nav_button("attendance", "🕒  Điểm danh quầy", self.show_attendance_view)
-        self.add_nav_button("schedule", "📅  Lịch làm việc", self.show_schedule_view)
-
-        # Menu cho Store Manager & Admin
-        if role in ("storemanager", "admin"):
-            self.add_nav_button("approval", "📋  Duyệt yêu cầu", self.show_approval_view)
-            self.add_nav_button("reports", "📊  Báo cáo Excel", self.show_reports_view)
-
-        # Menu chỉ cho Admin
-        if role == "admin":
-            self.add_nav_button("settings", "⚙️  Quản trị hệ thống", self.show_settings_view)
-
-        # Spacer
-        self.spacer = ctk.CTkLabel(self.sidebar_frame, text="")
-        self.spacer.pack(fill="both", expand=True)
-
-        # Nút Đăng xuất ở chân Sidebar
-        self.logout_sidebar_btn = ctk.CTkButton(
-            self.sidebar_frame,
-            text="🚪  Đăng xuất",
-            fg_color="transparent",
-            text_color="#FF4C4C",
-            hover_color=("#FDE8E8", "#3E1E1E"),
-            anchor="w",
-            height=40,
-            command=self.show_login_view
-        )
-        self.logout_sidebar_btn.pack(fill="x", padx=15, pady=(0, 20))
-
-        # Khung hiển thị nội dung bên phải
-        self.view_container = ctk.CTkFrame(self.main_app_frame, fg_color="transparent")
-        self.view_container.pack(side="right", fill="both", expand=True)
-
-    def add_nav_button(self, key, text, command):
-        btn = ctk.CTkButton(
-            self.sidebar_frame,
-            text=text,
-            font=ctk.CTkFont(size=13),
-            anchor="w",
-            height=42,
-            fg_color="transparent",
-            text_color=("gray10", "gray90"),
-            hover_color=("gray85", "gray25"),
-            corner_radius=8,
-            command=command
-        )
-        btn.pack(fill="x", padx=15, pady=4)
-        self.nav_buttons[key] = btn
-
-    def set_active_nav(self, active_key):
-        for key, btn in self.nav_buttons.items():
-            if key == active_key:
-                btn.configure(
-                    fg_color=("#3B8ED0", "#1F6AA5"),
-                    text_color="white",
-                    font=ctk.CTkFont(size=13, weight="bold")
-                )
-            else:
-                btn.configure(
-                    fg_color="transparent",
-                    text_color=("gray10", "gray90"),
-                    font=ctk.CTkFont(size=13)
-                )
-
-    def clear_view_container(self):
-        if self.current_view:
-            self.current_view.pack_forget()
-            self.current_view = None
-
-    def clear_container(self):
-        for widget in self.container.winfo_children():
-            widget.pack_forget()
-            widget.destroy()
-
-    # ================= VIEW SWITCHING (TỨC THÌ QUA CACHE) =================
-    def show_view(self, view_name):
-        self.set_active_nav(view_name)
-        if self.current_view:
-            self.current_view.pack_forget()
-
-        if view_name not in self.views:
-            if view_name == "attendance":
-                self.views["attendance"] = AttendanceView(
-                    self.view_container,
-                    current_profile=self.current_profile,
-                    on_logout=self.show_login_view
-                )
-            elif view_name == "schedule":
-                self.views["schedule"] = ScheduleView(
-                    self.view_container,
-                    current_profile=self.current_profile
-                )
-            elif view_name == "approval":
-                self.views["approval"] = ApprovalView(
-                    self.view_container,
-                    current_profile=self.current_profile
-                )
-            elif view_name == "reports":
-                self.views["reports"] = ReportView(
-                    self.view_container,
-                    current_profile=self.current_profile
-                )
-            elif view_name == "settings":
-                self.views["settings"] = SettingsView(
-                    self.view_container,
-                    current_profile=self.current_profile
-                )
-
-        self.current_view = self.views.get(view_name)
-        if self.current_view:
-            self.current_view.pack(fill="both", expand=True)
-
-    def show_attendance_view(self):
-        self.show_view("attendance")
-
-    def show_schedule_view(self):
-        self.show_view("schedule")
-
-    def show_approval_view(self):
-        self.show_view("approval")
-
-    def show_reports_view(self):
-        self.show_view("reports")
-
-    def show_settings_view(self):
-        self.show_view("settings")
 
 if __name__ == "__main__":
-    app = App()
-    app.mainloop()
+    sys.exit(main())
