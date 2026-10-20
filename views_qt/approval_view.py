@@ -13,6 +13,7 @@ class ApprovalView(Page):
         super().__init__(parent, current_profile)
         self.offset = 0
         self.busy = False
+        self.has_more = False
         self.heading("Duyệt yêu cầu", "Chọn một yêu cầu để xem lý do, ảnh minh chứng và xử lý.")
         controls = QHBoxLayout()
         self.kind = QComboBox()
@@ -68,6 +69,13 @@ class ApprovalView(Page):
         self.selection_changed()
         self.reset()
 
+    def on_show(self):
+        if not self.busy:
+            self.reset()
+
+    def on_hide(self):
+        self.tasks.cancel("image")
+
     def reset(self, *_):
         self.tasks.cancel("image")
         self.offset = 0
@@ -83,6 +91,7 @@ class ApprovalView(Page):
             return
         branch = None if self.current_profile["role"] == "admin" else self.current_profile["branch_id"]
         kind, status, offset = self.kind.currentData(), self.state.currentData(), self.offset
+        self.tasks.cancel("image")
         method = self.supabase.get_leave_requests if kind == "leave" else self.supabase.get_attendance_proofs
         self.status.setText("Đang tải yêu cầu…")
         self.busy = True
@@ -92,9 +101,10 @@ class ApprovalView(Page):
 
         def done(records):
             self.busy = False
+            self.has_more = len(records) > self.PAGE_SIZE
             self.model.replace(records[: self.PAGE_SIZE])
             self.prev_btn.setEnabled(offset > 0)
-            self.next_btn.setEnabled(len(records) > self.PAGE_SIZE)
+            self.next_btn.setEnabled(self.has_more)
             self.status.setText(
                 f"Trang {offset // self.PAGE_SIZE + 1} · {min(len(records), self.PAGE_SIZE)} yêu cầu"
                 if records
@@ -104,6 +114,7 @@ class ApprovalView(Page):
 
         def failed(message):
             self.busy = False
+            self.has_more = False
             self.model.replace([])
             self.prev_btn.setEnabled(offset > 0)
             self.error(message)
@@ -117,8 +128,10 @@ class ApprovalView(Page):
         )
 
     def selection_changed(self, *_):
+        self.tasks.cancel("image")
         record = self.selected(self.table)
-        actionable = bool(record) and record.get("status") == "pending" and not self.busy
+        actionable = (bool(record) and record.get("status") == "pending" and not self.busy
+                      and record.get("user_id") != self.current_profile["id"])
         self.approve_btn.setEnabled(actionable)
         self.reject_btn.setEnabled(actionable)
         self.details_btn.setEnabled(bool(record) and not self.busy)
@@ -137,7 +150,8 @@ class ApprovalView(Page):
 
     def review(self, status):
         record = self.selected(self.table)
-        if self.busy or not record or record.get("status") != "pending":
+        if (self.busy or not record or record.get("status") != "pending"
+                or record.get("user_id") == self.current_profile["id"]):
             return
         kind = self.kind.currentData()
         method = (
@@ -157,6 +171,7 @@ class ApprovalView(Page):
                 self.error(result.get("message", "Không thể duyệt yêu cầu."))
                 self.selection_changed()
                 self.prev_btn.setEnabled(self.offset > 0)
+                self.next_btn.setEnabled(self.has_more)
                 return
             self.load_data()
 

@@ -20,9 +20,36 @@ def parse_timestamp(value):
 def display_time(value):
     try:
         parsed = parse_timestamp(value)
-        return parsed.strftime("%H:%M:%S") if parsed else "—"
+        return parsed.strftime("%H:%M") if parsed else "—"
     except (TypeError, ValueError):
         return "—"
+
+
+def timestamp_tooltip(value):
+    """Keep the date and second-level precision available behind the minute display."""
+    try:
+        parsed = parse_timestamp(value)
+        return parsed.strftime("%d/%m/%Y %H:%M:%S") + " · Giờ Việt Nam" if parsed else "—"
+    except (TypeError, ValueError):
+        return "—"
+
+
+def display_duration(minutes):
+    """Format whole, nonnegative server minutes without wrapping at 24 hours."""
+    if type(minutes) is not int or minutes < 0:
+        return "—"
+    hours, remainder = divmod(minutes, 60)
+    return f"{hours:02d}:{remainder:02d}"
+
+
+def attendance_notes(record, *, include_unit=True):
+    values = []
+    if record.get("is_late"):
+        values.append(f"Muộn {display_duration(record.get('late_minutes'))}")
+    if record.get("is_early_leave"):
+        values.append(f"Về sớm {display_duration(record.get('early_minutes'))}")
+    result = " · ".join(values)
+    return f"{result} (giờ:phút)" if result and include_unit else result
 
 
 def first_attendance(schedule):

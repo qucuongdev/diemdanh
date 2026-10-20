@@ -4,7 +4,8 @@ from core.supabase_service import SupabaseService
 from core.hardware import get_hardware_uuid
 from core.domain import validate_profile
 from core.qt_worker import TaskRunner
-from views_qt.common import label, button
+from views_qt.common import label, button, StatusLabel
+from views_qt.qt_theme import ThemeToggleButton
 
 
 class LoginView(QWidget):
@@ -20,10 +21,11 @@ class LoginView(QWidget):
         card = QFrame()
         card.setObjectName("LoginCard")
         card.setMinimumWidth(430)
+        card.setMaximumWidth(520)
         form = QVBoxLayout(card)
         form.setContentsMargins(32, 32, 32, 32)
         form.setSpacing(14)
-        form.addWidget(label("Nhà thuốc · Điểm danh", True))
+        form.addWidget(label("Nhà thuốc · Chấm công", True))
         form.addWidget(label("Đăng nhập để bắt đầu ca làm việc."))
         form.addWidget(label("Tài khoản"))
         self.email_entry = QLineEdit()
@@ -33,13 +35,15 @@ class LoginView(QWidget):
         self.pass_entry = QLineEdit()
         self.pass_entry.setEchoMode(QLineEdit.EchoMode.Password)
         form.addWidget(self.pass_entry)
-        self.error_label = label()
+        self.error_label = StatusLabel()
         self.error_label.setMaximumWidth(390)
         form.addWidget(self.error_label)
         self.login_btn = button("Đăng nhập", self.handle_login, True)
         form.addWidget(self.login_btn)
         form.addWidget(label("Thiết bị sẽ được kiểm tra sau khi xác thực tài khoản."))
-        root.addWidget(card)
+        self.theme_button = ThemeToggleButton(self)
+        form.addWidget(self.theme_button, 0, Qt.AlignmentFlag.AlignRight)
+        root.addWidget(card, 0, Qt.AlignmentFlag.AlignCenter)
         self.email_entry.returnPressed.connect(self.handle_login)
         self.pass_entry.returnPressed.connect(self.handle_login)
 
@@ -48,7 +52,7 @@ class LoginView(QWidget):
             return
         email, password = self.email_entry.text().strip(), self.pass_entry.text()
         if not email or not password:
-            self.error_label.setText("Nhập tài khoản và mật khẩu để tiếp tục.")
+            self.error_label.set_error("Nhập tài khoản và mật khẩu để tiếp tục.")
             return
         if "@" not in email:
             email += "@nhathuoc.com"
@@ -70,6 +74,9 @@ class LoginView(QWidget):
             except ValueError as exc:
                 self.supabase.logout()
                 return {"success": False, "message": str(exc)}
+            except Exception:
+                self.supabase.logout()
+                raise
 
         self.tasks.submit("login", authenticate, self._on_auth_finished, self._on_auth_error, replace=False)
 
@@ -81,10 +88,10 @@ class LoginView(QWidget):
             self.error_label.clear()
             self.login_success.emit(result["profile"])
         else:
-            self.error_label.setText(result.get("message", "Đăng nhập thất bại."))
+            self.error_label.set_error(result.get("message", "Đăng nhập thất bại."))
 
     def _on_auth_error(self, message):
         self.busy = False
         self.login_btn.setEnabled(True)
         self.pass_entry.clear()
-        self.error_label.setText(message)
+        self.error_label.set_error(message)

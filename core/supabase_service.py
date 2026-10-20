@@ -6,8 +6,9 @@ import logging
 from core.domain import LOCAL_TZ, local_now, validate_profile, first_attendance
 from core.security import validate_public_key, requires_roles
 from PIL import Image
-from supabase import create_client, Client
-from core.config import SUPABASE_URL, SUPABASE_KEY
+from supabase import create_client, Client, ClientOptions
+from httpx import TransportError
+from core.config import SUPABASE_URL, SUPABASE_KEY, BACKEND_VERSION
 
 
 class ServiceError(RuntimeError):
@@ -28,24 +29,48 @@ class SupabaseService:
         return cls._instance
 
     def init_client(self):
+        self.configuration_error = "Chưa cấu hình Supabase. Kiểm tra SUPABASE_URL và SUPABASE_KEY trong file .env."
         if SUPABASE_URL and SUPABASE_KEY and SUPABASE_URL != "https://your-project-id.supabase.co":
             try:
                 validate_public_key(SUPABASE_KEY)
-                from supabase.lib.client_options import ClientOptions
-
                 self.client = create_client(
                     SUPABASE_URL,
                     SUPABASE_KEY,
                     options=ClientOptions(postgrest_client_timeout=15, storage_client_timeout=20),
                 )
+                self.configuration_error = ""
             except Exception as e:
                 logging.getLogger(__name__).warning("Supabase configuration rejected: %s", type(e).__name__)
+                self.configuration_error = "Không thể khởi tạo Supabase. Kiểm tra URL, public key và thư viện đã cài."
                 self.client = None
         else:
             self.client = None
 
     def is_configured(self) -> bool:
         return self.client is not None
+
+    def check_backend(self):
+        """Return actionable, sanitized diagnostics; never bypass the version gate."""
+        try:
+            version = self.client.rpc("rpc_client_version", {}).execute().data
+        except Exception as exc:
+            code = str(getattr(exc, "code", ""))
+            logging.getLogger(__name__).warning("Backend compatibility check failed: %s", type(exc).__name__)
+            if code in ("PGRST202", "42883"):
+                return {"success": False, "code": "backend_missing", "message":
+                    "Máy chủ thiếu bản cập nhật. Quản trị viên cần áp dụng các migration theo README rồi đăng nhập lại."}
+            if code in ("42501", "PGRST301", "PGRST302", "PGRST303"):
+                return {"success": False, "code": "backend_permission", "message":
+                    "Không có quyền kiểm tra phiên bản máy chủ. Liên hệ quản trị viên kiểm tra quyền RPC và phiên đăng nhập."}
+            if isinstance(exc, (TransportError, ConnectionError, TimeoutError)):
+                return {"success": False, "code": "backend_network", "message":
+                    "Không thể kiểm tra phiên bản máy chủ do lỗi kết nối. Kiểm tra mạng rồi đăng nhập lại."}
+            return {"success": False, "code": "backend_check_failed", "message":
+                "Không thể kiểm tra phiên bản máy chủ. Thử đăng nhập lại hoặc liên hệ quản trị viên kiểm tra RPC."}
+        if type(version) is not int or version != BACKEND_VERSION:
+            return {"success": False, "code": "backend_incompatible", "message":
+                f"Ứng dụng cần backend phiên bản {BACKEND_VERSION}. Quản trị viên cần đối chiếu migration và phiên bản ứng dụng theo README."}
+        return {"success": True}
 
     def _sanitize_error(
         self,
@@ -84,7 +109,7 @@ class SupabaseService:
         if not self.client:
             return {
                 "success": False,
-                "message": "Không thể kết nối đến máy chủ xác thực. Vui lòng kiểm tra cấu hình mạng!",
+                "message": self.configuration_error,
             }
 
         try:
@@ -111,16 +136,10 @@ class SupabaseService:
                 }
 
             validate_profile(self.current_profile)
-            try:
-                version = self.client.rpc("rpc_client_version", {}).execute().data
-                if version != 2:
-                    raise ValueError("Unsupported backend")
-            except Exception:
+            compatibility = self.check_backend()
+            if not compatibility["success"]:
                 self.logout()
-                return {
-                    "success": False,
-                    "message": "Hệ thống cần cập nhật trước khi sử dụng. Liên hệ quản trị viên.",
-                }
+                return compatibility
             return {"success": True, "user": self.current_user, "profile": self.current_profile}
         except Exception as e:
             self.logout()
@@ -760,7 +779,7 @@ class SupabaseService:
             if len(file_bytes) > 500 * 1024:
                 return {"success": False, "message": "Ảnh sau nén vượt quá 500 KB. Chọn ảnh nhỏ hơn."}
 
-            filename = f"{user_id}/{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}.jpg"
+            filename = f"{user_id}/{local_now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}.jpg"
             bucket_name = "attendance_proofs"
 
             self.client.storage.from_(bucket_name).upload(

@@ -33,7 +33,9 @@ class TableModel(QAbstractTableModel):
     def data(self, index, role=Qt.ItemDataRole.DisplayRole):
         if not index.isValid() or role not in (Qt.ItemDataRole.DisplayRole, Qt.ItemDataRole.ToolTipRole):
             return None
-        value = self.columns[index.column()][1](self.records[index.row()])
+        column = self.columns[index.column()]
+        renderer = column[2] if role == Qt.ItemDataRole.ToolTipRole and len(column) > 2 else column[1]
+        value = renderer(self.records[index.row()])
         return str(value if value is not None else "—")
 
     def headerData(self, section, orientation, role=Qt.ItemDataRole.DisplayRole):
@@ -47,8 +49,40 @@ class TableModel(QAbstractTableModel):
         self.endResetModel()
 
 
+class DataTableView(QTableView):
+    """Fit a small set of columns without scanning records or adding row widgets."""
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self.fit_columns()
+
+    def fit_columns(self):
+        model = self.model()
+        if model is None or not model.columnCount():
+            return
+        widths = {
+            "Nhân viên": (280, 160), "Họ tên": (280, 160), "Chi nhánh": (320, 180),
+            "Địa chỉ": (360, 180), "Nội dung": (360, 180), "Trạng thái": (240, 150),
+            "Mã máy": (300, 180), "Tên máy": (220, 160), "Ca": (180, 120),
+            "Ca làm": (180, 120), "Tên ca": (180, 120), "Điện thoại": (160, 130),
+            "Ngày": (130, 110), "Ngày ca": (130, 110), "Muộn (giờ:phút)": (190, 150),
+            "Trạng thái (giờ:phút)": (280, 210),
+        }
+        sizes = [widths.get(column[0], (110, 80)) for column in model.columns]
+        minimum = [max(size[1], self.fontMetrics().horizontalAdvance(column[0]) + 28)
+                   for size, column in zip(sizes, model.columns, strict=True)]
+        available = max(self.viewport().width(), sum(minimum))
+        remaining = available
+        extra = available - sum(minimum)
+        total = sum(size[0] for size in sizes)
+        for index, (preferred, smallest) in enumerate(zip(sizes, minimum, strict=True)):
+            size = remaining if index == len(sizes) - 1 else smallest + int(extra * preferred[0] / total)
+            self.setColumnWidth(index, size)
+            remaining -= size
+
+
 def table_for(model):
-    table = QTableView()
+    table = DataTableView()
     table.setModel(model)
     table.setAlternatingRowColors(True)
     table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
@@ -58,8 +92,10 @@ def table_for(model):
     table.verticalHeader().hide()
     table.verticalHeader().setDefaultSectionSize(42)
     table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
-    table.horizontalHeader().setStretchLastSection(True)
-    table.horizontalHeader().setDefaultSectionSize(150)
+    table.horizontalHeader().setStretchLastSection(False)
+    table.horizontalHeader().setMinimumSectionSize(80)
+    model.modelReset.connect(table.fit_columns)
+    table.fit_columns()
     return table
 
 
@@ -82,6 +118,25 @@ def button(text, callback, primary=False):
     return widget
 
 
+class StatusLabel(QLabel):
+    def __init__(self):
+        super().__init__()
+        self.setTextFormat(Qt.TextFormat.PlainText)
+        self.setWordWrap(True)
+
+    def setText(self, text):
+        self.setProperty("error", False)
+        super().setText(text)
+        self.style().unpolish(self)
+        self.style().polish(self)
+
+    def set_error(self, text):
+        self.setText(text)
+        self.setProperty("error", True)
+        self.style().unpolish(self)
+        self.style().polish(self)
+
+
 class Page(QWidget):
     def __init__(self, parent=None, current_profile=None):
         super().__init__(parent)
@@ -93,15 +148,14 @@ class Page(QWidget):
         self.root = QVBoxLayout(self)
         self.root.setContentsMargins(24, 24, 24, 24)
         self.root.setSpacing(16)
-        self.status = label()
+        self.status = StatusLabel()
 
     def heading(self, title, subtitle):
         self.root.addWidget(label(title, True))
         self.root.addWidget(label(subtitle))
 
     def error(self, message):
-        self.status.setText(message)
-        self.status.setProperty("error", True)
+        self.status.set_error(message)
 
     def selected(self, table):
         rows = table.selectionModel().selectedRows()
@@ -109,8 +163,6 @@ class Page(QWidget):
 
     def mutate(self, work, on_done, controls=(), owner=None):
         runner = self.tasks if owner is None else owner.tasks
-        for control in controls:
-            control.setEnabled(False)
 
         def restore():
             for control in controls:
@@ -129,8 +181,9 @@ class Page(QWidget):
             on_done()
 
         accepted = runner.submit("mutation", work, done, failed, replace=False)
-        if not accepted:
-            restore()
+        if accepted:
+            for control in controls:
+                control.setEnabled(False)
         return accepted
 
 
@@ -163,12 +216,15 @@ class FormDialog(QDialog):
         self.buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel
         )
+        self.buttons.button(QDialogButtonBox.StandardButton.Save).setText("Lưu")
+        self.buttons.button(QDialogButtonBox.StandardButton.Cancel).setText("Hủy")
         self.buttons.rejected.connect(self.reject)
         layout.addWidget(self.buttons)
 
     def values(self):
         return {
-            key: w.currentData() if isinstance(w, QComboBox) else w.text().strip()
+            key: (w.currentData() if isinstance(w, QComboBox)
+                  else w.text() if key == "password" else w.text().strip())
             for key, w in self.fields.items()
         }
 

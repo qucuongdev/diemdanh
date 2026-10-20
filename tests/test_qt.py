@@ -8,22 +8,79 @@ os.environ["QT_QPA_PLATFORM"] = "offscreen"
 from contextlib import ExitStack
 from pathlib import Path
 import threading
+import tempfile
 import time
 import unittest
 from unittest.mock import MagicMock, patch
-from PySide6.QtCore import QCoreApplication, QEvent, QThread
+from PySide6.QtCore import QCoreApplication, QEvent, QThread, QSettings, Qt
+from PySide6.QtGui import QPalette
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QWidget
 from core.qt_worker import QtWorker, TaskRunner
 from core.supabase_service import SupabaseService
 from core.domain import local_now
-from views_qt.qt_theme import configure_application
+from views_qt.qt_theme import configure_application, ThemeManager, THEMES
 from main import MainWindow
 
 APP = QApplication.instance() or QApplication([])
 configure_application(APP)
 ADMIN = {"id": "admin", "full_name": "Nguyễn Minh Anh", "role": "admin", "is_active": True, "branch_id": "b"}
 STAFF = {"id": "staff", "full_name": "Trần Thảo Linh", "role": "staff", "branch_id": "b", "is_active": True}
+
+
+class ThemeTests(unittest.TestCase):
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.path = str(Path(self.directory.name) / "appearance.ini")
+        self.settings = QSettings(self.path, QSettings.Format.IniFormat)
+        self.managers = []
+
+    def manager(self, settings=None):
+        manager = ThemeManager(APP, self.settings if settings is None else settings)
+        self.managers.append(manager)
+        return manager
+
+    def tearDown(self):
+        for manager in self.managers:
+            manager.deleteLater()
+        APP.theme_manager.apply()
+        APP.processEvents()
+
+    def test_theme_preference_is_restored_from_isolated_settings(self):
+        manager = self.manager()
+        manager.set_mode("light")
+        self.settings.sync()
+        restored = self.manager(QSettings(self.path, QSettings.Format.IniFormat))
+        self.assertEqual(restored.mode, "light")
+        self.assertGreater(APP.palette().color(QPalette.ColorRole.Window).lightness(), 200)
+        restored.set_mode("dark")
+        self.assertLess(APP.palette().color(QPalette.ColorRole.Window).lightness(), 60)
+
+    def test_invalid_saved_theme_falls_back_and_invalid_updates_are_rejected(self):
+        self.settings.setValue("appearance/theme", ["invalid"])
+        manager = self.manager()
+        self.assertEqual(manager.mode, "dark")
+        with self.assertRaises(ValueError):
+            manager.set_mode("invalid")
+        self.assertEqual(manager.mode, "dark")
+
+    def test_palette_has_readable_text_and_disabled_controls_in_both_modes(self):
+        def luminance(color):
+            channels = [value / 12.92 if value <= 0.04045 else ((value + 0.055) / 1.055) ** 2.4
+                        for value in (color.redF(), color.greenF(), color.blueF())]
+            return sum(value * weight for value, weight in zip(channels, (0.2126, 0.7152, 0.0722), strict=True))
+
+        manager = self.manager()
+        for mode in THEMES:
+            manager.set_mode(mode)
+            palette = APP.palette()
+            for foreground, background in ((QPalette.ColorRole.Text, QPalette.ColorRole.Base),
+                                           (QPalette.ColorRole.HighlightedText, QPalette.ColorRole.Highlight)):
+                light, dark = sorted((luminance(palette.color(foreground)), luminance(palette.color(background))))[::-1]
+                self.assertGreaterEqual((light + 0.05) / (dark + 0.05), 4.5)
+            self.assertNotEqual(palette.color(QPalette.ColorGroup.Disabled, QPalette.ColorRole.Text),
+                                palette.color(QPalette.ColorGroup.Active, QPalette.ColorRole.Text))
 
 
 def until(predicate, timeout=4):
@@ -127,6 +184,7 @@ class WorkerTests(unittest.TestCase):
 
 class UiTests(unittest.TestCase):
     def setUp(self):
+        APP.theme_manager.set_mode("dark")
         self.stack = ExitStack()
         self.service = fake_service()
         for target in [
@@ -149,6 +207,7 @@ class UiTests(unittest.TestCase):
         self.window.deleteLater()
         APP.processEvents()
         self.stack.close()
+        APP.theme_manager.set_mode("dark")
 
     def login(self, profile=ADMIN):
         self.window.on_login_success(profile)
@@ -178,10 +237,309 @@ class UiTests(unittest.TestCase):
         self.service.login.assert_called_once()
         self.assertEqual(login.pass_entry.text(), "")
 
+    def test_login_card_is_centered_and_has_bounded_width(self):
+        from PySide6.QtWidgets import QFrame
+
+        card = self.window.login_view.findChild(QFrame, "LoginCard")
+        self.assertLessEqual(card.width(), 520)
+        self.assertAlmostEqual(card.geometry().center().x(), self.window.login_view.rect().center().x(), delta=2)
+        folder = Path("artifacts/previews")
+        folder.mkdir(parents=True, exist_ok=True)
+        self.assertTrue(self.window.grab().save(str(folder / "login.png")))
+
+    def test_unexpected_device_check_failure_logs_out_and_restores_login(self):
+        self.service.check_device_permission.side_effect = RuntimeError("secret device failure")
+        login = self.window.login_view
+        login.email_entry.setText("staff")
+        login.pass_entry.setText("test-password")
+        login.handle_login()
+        until(lambda: not login.busy)
+        self.service.logout.assert_called_once()
+        self.assertEqual(self.window.root_stack.currentIndex(), 0)
+        self.assertTrue(login.login_btn.isEnabled())
+        self.assertEqual(login.pass_entry.text(), "")
+        self.assertNotIn("secret", login.error_label.text())
+
+    def test_attendance_rejection_remains_visible_without_being_overwritten(self):
+        self.login(STAFF)
+        view = self.window.main_app_widget.views["attendance"]
+        self.service.check_in.return_value = {"success": False, "message": "Thiết bị chưa được cấp phép."}
+        before = self.service.get_today_schedule.call_count
+        view.handle_check_in()
+        until(lambda: not view.busy)
+        self.assertIn("chưa được cấp phép", view.status.text())
+        self.assertEqual(self.service.get_today_schedule.call_count, before)
+        self.assertTrue(view.btn_check_in.isEnabled())
+
+    def test_attendance_success_message_survives_schedule_reload(self):
+        self.login(STAFF)
+        view = self.window.main_app_widget.views["attendance"]
+        self.service.check_in.return_value = {"success": True, "message": "Đã vào ca. Đi muộn 2 phút."}
+        schedule = self.service.get_today_schedule.return_value["schedules"][0]
+        self.service.get_today_schedule.return_value = {"success": True, "schedules": [
+            {**schedule, "attendance": {"id": "a", "check_in": "2026-10-21T01:01:30Z",
+                                       "is_late": True, "late_minutes": 2}},
+        ]}
+        view.handle_check_in()
+        until(lambda: not view.busy and not view.loading)
+        self.assertEqual(view.status.text(), "Check-in thành công.")
+        self.assertIn("Muộn 00:02 (giờ:phút)", view.detail.text())
+        self.assertIn("08:01:30", view.detail.toolTip())
+
+    def test_failed_schedule_refresh_does_not_leave_actionable_old_shift(self):
+        self.login(STAFF)
+        view = self.window.main_app_widget.views["attendance"]
+        self.service.get_today_schedule.side_effect = RuntimeError("secret")
+        view.load_schedule()
+        until(lambda: not view.loading)
+        self.assertEqual(view.schedules, [])
+        self.assertFalse(view.btn_check_in.isEnabled())
+        self.assertFalse(view.btn_check_out.isEnabled())
+        self.assertIn("Không thể xác định", view.detail.text())
+
+    def test_history_failed_refresh_clears_previous_records_and_totals(self):
+        from views_qt.attendance_history_dialog import AttendanceHistoryDialog
+
+        dialog = AttendanceHistoryDialog(self.window, ADMIN)
+        dialog.open()
+        until(lambda: dialog.page.ready and not QtWorker.busy())
+        dialog.page._render_records([{"check_in": None}])
+        self.service.get_attendance_history.side_effect = RuntimeError("secret")
+        dialog.page.reset()
+        until(lambda: not QtWorker.busy())
+        self.assertEqual(dialog.page.model.rowCount(), 0)
+        self.assertEqual(dialog.page.summary.text(), "")
+        self.assertFalse(dialog.page.next_btn.isEnabled())
+        dialog.close()
+
+    def test_report_failed_reload_removes_previous_totals_and_export(self):
+        self.login()
+        self.window.main_app_widget.show_view("reports")
+        view = self.window.main_app_widget.views["reports"]
+        until(lambda: view.search_btn.isEnabled())
+        view.load_report_data()
+        until(lambda: bool(view.report_data))
+        self.service.get_monthly_attendance_data.side_effect = RuntimeError("secret")
+        view.load_report_data()
+        until(lambda: not QtWorker.busy())
+        self.assertEqual(view.report_data, [])
+        self.assertEqual(view.model.rowCount(), 0)
+        self.assertFalse(view.export_btn.isEnabled())
+
+    def test_settings_cannot_edit_cached_rows_during_refresh(self):
+        self.login()
+        self.window.main_app_widget.show_view("settings")
+        view = self.window.main_app_widget.views["settings"]
+        until(lambda: view.ready)
+        release = threading.Event()
+        self.addCleanup(release.set)
+        records = self.service.get_branches.return_value
+        self.service.get_branches.side_effect = lambda *args: (release.wait(2), records)[1]
+        view.refresh()
+        view.kind.setCurrentIndex(1)
+        self.assertEqual(view.model.rowCount(), 0)
+        self.assertFalse(view.edit_btn.isEnabled())
+        self.assertFalse(view.delete_btn.isEnabled())
+        release.set()
+        until(lambda: view.ready)
+
+    def test_switching_back_to_schedule_refreshes_changes_from_other_pages(self):
+        self.login()
+        main = self.window.main_app_widget
+        main.show_view("schedule")
+        view = main.views["schedule"]
+        until(lambda: view.ready and not QtWorker.busy())
+        previous = self.service.get_schedules_range.call_count
+        main.show_view("attendance")
+        main.show_view("schedule")
+        until(lambda: not QtWorker.busy())
+        self.assertGreater(self.service.get_schedules_range.call_count, previous)
+
+    def test_form_preserves_password_whitespace(self):
+        from views_qt.common import FormDialog
+
+        dialog = FormDialog(self.window, "Test", [("password", "Mật khẩu", ""), ("name", "Tên", "")])
+        dialog.fields["password"].setText(" test password ")
+        dialog.fields["name"].setText(" Nhân viên ")
+        self.assertEqual(dialog.values(), {"password": " test password ", "name": "Nhân viên"})
+        dialog.deleteLater()
+
+    def test_duplicate_mutation_keeps_controls_disabled_until_first_finishes(self):
+        self.login()
+        view = self.window.main_app_widget.views["attendance"]
+        release = threading.Event()
+        self.addCleanup(release.set)
+        results = []
+        controls = [view.btn_upload_proof]
+        def work():
+            release.wait(2)
+            return {"success": True}
+
+        self.assertTrue(view.mutate(work, lambda: results.append(True), controls))
+        self.assertFalse(view.mutate(work, lambda: self.fail("Duplicate mutation"), controls))
+        self.assertFalse(view.btn_upload_proof.isEnabled())
+        release.set()
+        until(lambda: bool(results))
+        self.assertTrue(view.btn_upload_proof.isEnabled())
+
+    def test_approval_self_review_is_disabled_and_direct_call_is_ignored(self):
+        self.login()
+        main = self.window.main_app_widget
+        main.show_view("approval")
+        view = main.views["approval"]
+        until(lambda: not view.busy)
+        view.model.replace([{"id": "r", "user_id": ADMIN["id"], "status": "pending"}])
+        view.table.selectRow(0)
+        view.selection_changed()
+        self.assertFalse(view.approve_btn.isEnabled())
+        self.assertFalse(view.reject_btn.isEnabled())
+        view.review("approved")
+        self.service.review_leave_request.assert_not_called()
+
+    def test_failed_review_restores_pagination(self):
+        self.login()
+        self.service.get_leave_requests.return_value = [
+            {"id": "r", "user_id": STAFF["id"], "status": "pending"}
+        ] * 51
+        self.window.main_app_widget.show_view("approval")
+        view = self.window.main_app_widget.views["approval"]
+        until(lambda: not view.busy)
+        self.assertTrue(view.next_btn.isEnabled())
+        view.table.selectRow(0)
+        self.service.review_leave_request.side_effect = RuntimeError("secret")
+        view.review("approved")
+        until(lambda: not view.busy)
+        self.assertTrue(view.next_btn.isEnabled())
+        self.assertTrue(view.approve_btn.isEnabled())
+        self.assertNotIn("secret", view.status.text())
+
+    def test_proof_url_result_does_not_open_browser_after_leaving_page(self):
+        self.login()
+        main = self.window.main_app_widget
+        main.show_view("approval")
+        view = main.views["approval"]
+        until(lambda: not view.busy)
+        self.service.get_attendance_proofs.return_value = [
+            {"id": "p", "user_id": STAFF["id"], "status": "pending", "image_url": "staff/proof.jpg"}
+        ]
+        view.kind.setCurrentIndex(1)
+        until(lambda: not view.busy)
+        view.table.selectRow(0)
+        release = threading.Event()
+        self.addCleanup(release.set)
+        self.service.get_proof_url.side_effect = lambda *args: (release.wait(2), "https://offline.example/proof")[1]
+        with patch("views_qt.approval_view.QDesktopServices.openUrl") as open_url:
+            view.open_image()
+            main.show_view("attendance")
+            release.set()
+            until(lambda: not QtWorker.busy())
+            open_url.assert_not_called()
+
     def test_invalid_profile_rejected_before_navigation(self):
         self.window.on_login_success({**STAFF, "is_active": False})
         self.assertEqual(self.window.root_stack.currentIndex(), 0)
         self.assertFalse(self.window.main_app_widget.views)
+
+    def test_login_theme_toggle_preserves_fields_and_updates_both_buttons(self):
+        login = self.window.login_view
+        login.email_entry.setText("offline@example.com")
+        login.pass_entry.setText("test-password")
+        login.theme_button.click()
+        self.assertEqual(APP.theme_manager.mode, "light")
+        self.assertEqual(login.theme_button.text(), "Giao diện tối")
+        self.assertEqual(self.window.main_app_widget.theme_button.text(), "Giao diện tối")
+        self.assertEqual(login.pass_entry.text(), "test-password")
+        self.assertEqual(login.email_entry.text(), "offline@example.com")
+        self.assertEqual(self.window.root_stack.currentIndex(), 0)
+        self.service.login.assert_not_called()
+
+    def test_theme_switch_keeps_calendar_filters_selection_and_records_without_requests(self):
+        self.login()
+        main = self.window.main_app_widget
+        main.show_view("schedule")
+        view = main.views["schedule"]
+        until(lambda: view.ready and not QtWorker.busy())
+        selected = view.calendar.selectedDate()
+        filters = (view.branch_combo.currentData(), view.staff_combo.currentData())
+        records = list(view.model.records)
+        calls = list(self.service.mock_calls)
+        main.theme_button.click()
+        self.assertEqual(APP.theme_manager.mode, "light")
+        self.assertEqual(main.active_nav_key, "schedule")
+        self.assertEqual(view.calendar.selectedDate(), selected)
+        self.assertEqual((view.branch_combo.currentData(), view.staff_combo.currentData()), filters)
+        self.assertEqual(view.model.records, records)
+        self.assertEqual(self.service.mock_calls, calls)
+        for marked in view._marked_dates:
+            self.assertEqual(view.calendar.dateTextFormat(marked).background().color().name(),
+                             THEMES["light"]["selection"])
+
+    def test_theme_switch_does_not_enable_attendance_while_schedule_is_loading(self):
+        self.login(STAFF)
+        main = self.window.main_app_widget
+        view = main.views["attendance"]
+        result = self.service.get_today_schedule.return_value
+        release = threading.Event()
+        self.addCleanup(release.set)
+        self.service.get_today_schedule.side_effect = lambda *args: (release.wait(2), result)[1]
+        view.load_schedule()
+        main.theme_button.click()
+        self.assertFalse(view.btn_check_in.isEnabled())
+        self.assertFalse(view.btn_check_out.isEnabled())
+        self.assertTrue(view.loading)
+        release.set()
+        until(lambda: not view.loading)
+        self.assertTrue(view.btn_check_in.isEnabled())
+
+    def test_checkin_labels_version_and_responsive_card_width(self):
+        from PySide6.QtWidgets import QFrame
+
+        self.window.resize(1900, 1000)
+        self.login(STAFF)
+        view = self.window.main_app_widget.views["attendance"]
+        APP.processEvents()
+        self.assertTrue(self.window.windowTitle().endswith("1.0.0"))
+        self.assertEqual(view.btn_check_in.text(), "Check-in")
+        self.assertEqual(view.btn_check_out.text(), "Check-out")
+        self.assertRegex(view.clock_label.text(), r"^\d{2}:\d{2}$")
+        card = view.findChild(QFrame, "Card")
+        self.assertGreater(card.width(), 700)
+        self.assertLessEqual(card.width(), 1100)
+
+    def test_table_prioritizes_name_and_branch_in_wide_window(self):
+        self.window.resize(1900, 1000)
+        self.login()
+        self.window.main_app_widget.show_view("settings")
+        view = self.window.main_app_widget.views["settings"]
+        until(lambda: view.ready and not QtWorker.busy())
+        view.kind.setCurrentIndex(3)
+        APP.processEvents()
+        self.assertGreater(view.table.columnWidth(0), view.table.columnWidth(4))
+        self.assertGreater(view.table.columnWidth(1), view.table.columnWidth(4))
+        self.assertLess(view.table.columnWidth(4), view.table.viewport().width() * 0.4)
+
+    def test_history_flags_are_hours_minutes_and_checkout_is_not_full_credit(self):
+        from views_qt.attendance_history_dialog import history_status
+
+        self.assertEqual(history_status({"check_out": "done", "is_late": True, "late_minutes": 369}),
+                         "Muộn 06:09")
+        self.assertEqual(history_status({"check_out": None, "is_early_leave": True, "early_minutes": 5}),
+                         "Về sớm 00:05 · Chưa check-out")
+
+    def test_form_buttons_are_vietnamese_in_both_themes(self):
+        from PySide6.QtWidgets import QDialogButtonBox
+        from views_qt.common import FormDialog
+
+        dialog = FormDialog(self.window, "Test", [("name", "Họ tên", "Nhân viên")])
+        dialog.show()
+        for mode in THEMES:
+            APP.theme_manager.set_mode(mode)
+            APP.processEvents()
+            self.assertEqual(dialog.buttons.button(QDialogButtonBox.StandardButton.Save).text(), "Lưu")
+            self.assertEqual(dialog.buttons.button(QDialogButtonBox.StandardButton.Cancel).text(), "Hủy")
+            self.assertEqual(dialog.fields["name"].text(), "Nhân viên")
+        dialog.close()
+        dialog.deleteLater()
 
     def test_history_uses_ids_even_for_duplicate_names_and_limits_widget_count(self):
         from views_qt.attendance_history_dialog import AttendanceHistoryDialog
@@ -199,6 +557,10 @@ class UiTests(unittest.TestCase):
         self.assertTrue(dialog.page.next_btn.isEnabled())
         self.assertEqual(len(dialog.findChildren(QWidget)), before)
         self.assertEqual(dialog.page.model.data(dialog.page.model.index(0, 0)), "<b>literal</b>")
+        dialog.page._render_records([{"check_in": "2026-10-20T18:00:01Z"}])
+        self.assertEqual(dialog.page.model.data(dialog.page.model.index(0, 4)), "01:00")
+        self.assertEqual(dialog.page.model.data(dialog.page.model.index(0, 4), Qt.ItemDataRole.ToolTipRole),
+                         "21/10/2026 01:00:01 · Giờ Việt Nam")
         dialog.close()
 
     def test_staff_history_cannot_change_scope(self):
@@ -235,12 +597,52 @@ class UiTests(unittest.TestCase):
         self.assertEqual(view.report_data, [])
 
     def test_all_pages_open_offline_and_save_previews(self):
-        self.login()
         folder = Path("artifacts/previews")
         folder.mkdir(parents=True, exist_ok=True)
-        for key in ["attendance", "schedule", "approval", "reports", "settings"]:
-            self.window.main_app_widget.show_view(key)
-            until(lambda: not QtWorker.busy())
-            QTest.qWait(10)
-            self.assertTrue(self.window.grab().save(str(folder / f"{key}.png")))
-            self.assertEqual(self.window.main_app_widget.active_nav_key, key)
+        for mode in THEMES:
+            APP.theme_manager.set_mode(mode)
+            APP.processEvents()
+            self.assertTrue(self.window.grab().save(str(folder / f"{mode}_login.png")))
+        schedule = self.service.get_today_schedule.return_value["schedules"][0]
+        today = local_now().date().isoformat()
+        attendance = {"id": "a", "check_in": f"{today}T02:05:00Z", "check_out": f"{today}T09:00:00Z",
+                      "is_late": True, "late_minutes": 65}
+        schedule.update(status="completed", attendance=attendance)
+        self.login()
+        for mode in THEMES:
+            APP.theme_manager.set_mode(mode)
+            for key in ["attendance", "schedule", "approval", "reports", "settings"]:
+                self.window.main_app_widget.show_view(key)
+                until(lambda: not QtWorker.busy())
+                if key == "reports":
+                    view = self.window.main_app_widget.views[key]
+                    view.load_report_data()
+                    until(lambda view=view: bool(view.report_data))
+                APP.processEvents()
+                self.assertTrue(self.window.grab().save(str(folder / f"{mode}_{key}.png")))
+                self.assertEqual(self.window.main_app_widget.active_nav_key, key)
+                if mode == "dark":
+                    self.assertTrue(self.window.grab().save(str(folder / f"{key}.png")))
+        from views_qt.attendance_history_dialog import AttendanceHistoryDialog
+        from views_qt.common import FormDialog
+
+        self.service.get_attendance_history.return_value = [
+            {**attendance, "profiles": STAFF, "branches": {"name": "Nhà thuốc An Tâm"},
+             "schedules": {"work_date": today, "shifts": {"name": "Ca sáng"}}}
+        ]
+        history = AttendanceHistoryDialog(self.window, ADMIN)
+        history.open()
+        until(lambda: history.page.ready and not QtWorker.busy())
+        form = FormDialog(self.window, "Thêm nhân sự", [
+            ("email", "Email", "offline@example.com"), ("password", "Mật khẩu", ""),
+            ("name", "Họ tên", "Nhân viên thử nghiệm"),
+        ])
+        form.show()
+        for mode in THEMES:
+            APP.theme_manager.set_mode(mode)
+            APP.processEvents()
+            self.assertTrue(history.grab().save(str(folder / f"{mode}_history.png")))
+            self.assertTrue(form.grab().save(str(folder / f"{mode}_form.png")))
+        history.close()
+        form.close()
+        form.deleteLater()

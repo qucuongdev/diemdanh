@@ -13,7 +13,7 @@ def validate_public_key(key: str) -> None:
             claims = json.loads(base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)))
         except (ValueError, TypeError):
             raise ValueError("Invalid Supabase key") from None
-        if claims.get("role") == "anon":
+        if isinstance(claims, dict) and claims.get("role") == "anon":
             return
     raise ValueError("Only public Supabase keys are allowed in desktop clients")
 

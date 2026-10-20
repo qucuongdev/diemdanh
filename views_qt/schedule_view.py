@@ -1,8 +1,8 @@
 import calendar
 from datetime import date
-from PySide6.QtCore import QDate, Qt
-from PySide6.QtGui import QTextCharFormat, QColor
-from PySide6.QtWidgets import QHBoxLayout, QComboBox, QCalendarWidget, QMessageBox
+from PySide6.QtCore import QDate, Qt, Slot
+from PySide6.QtGui import QTextCharFormat, QColor, QIcon
+from PySide6.QtWidgets import QApplication, QHBoxLayout, QComboBox, QCalendarWidget, QMessageBox, QToolButton
 from core.domain import local_now, first_attendance
 from views_qt.common import Page, TableModel, table_for, button, FormDialog
 
@@ -11,6 +11,7 @@ class ScheduleView(Page):
     def __init__(self, parent=None, current_profile=None):
         super().__init__(parent, current_profile)
         self.ready = False
+        self.loading = False
         self.branches, self.staffs, self.shifts = [], [], []
         self.schedules = []
         self._marked_dates = []
@@ -75,7 +76,32 @@ class ScheduleView(Page):
         self.calendar.selectionChanged.connect(self.render_selected_day)
         self.branch_combo.currentIndexChanged.connect(self.render_month_calendar)
         self.staff_combo.currentIndexChanged.connect(self.render_month_calendar)
+        self.theme_manager = QApplication.instance().theme_manager
+        self.theme_manager.changed.connect(self.apply_calendar_theme)
+        self.apply_calendar_theme()
         self.refresh_calendar()
+
+    @Slot(str)
+    def apply_calendar_theme(self, _mode=None):
+        colors = self.theme_manager.colors
+        # Text arrows inherit both palettes; Qt's cached navigation icons can stay black.
+        for name, text, caption in (("qt_calendar_prevmonth", "‹", "Tháng trước"),
+                                    ("qt_calendar_nextmonth", "›", "Tháng sau")):
+            navigation = self.calendar.findChild(QToolButton, name)
+            if navigation is not None:
+                navigation.setIcon(QIcon())
+                navigation.setArrowType(Qt.ArrowType.NoArrow)
+                navigation.setText(text)
+                navigation.setAccessibleName(caption)
+        weekend = QTextCharFormat()
+        weekend.setForeground(QColor(colors["weekend"]))
+        for day in (Qt.DayOfWeek.Saturday, Qt.DayOfWeek.Sunday):
+            self.calendar.setWeekdayTextFormat(day, weekend)
+        marked = QTextCharFormat()
+        marked.setBackground(QColor(colors["selection"]))
+        marked.setForeground(QColor(colors["selection_text"]))
+        for day in self._marked_dates:
+            self.calendar.setDateTextFormat(day, marked)
 
     def goto_today(self):
         today = local_now().date()
@@ -83,8 +109,20 @@ class ScheduleView(Page):
         self.calendar.showSelectedDate()
         self.render_month_calendar()
 
+    def on_show(self):
+        if self.ready:
+            self.refresh_calendar()
+
     def refresh_calendar(self):
         self.ready = False
+        self.tasks.cancel("calendar")
+        self.loading = True
+        for day in self._marked_dates:
+            self.calendar.setDateTextFormat(day, QTextCharFormat())
+        self._marked_dates = []
+        self.schedules = []
+        self.model.replace([])
+        self.delete_btn.setEnabled(False)
         self.add_btn.setEnabled(False)
         self.status.setText("Đang tải danh mục…")
         self.tasks.submit(
@@ -95,8 +133,12 @@ class ScheduleView(Page):
                 self.supabase.get_shifts(force_refresh=True),
             ),
             self.metadata,
-            self.error,
+            self.metadata_failed,
         )
+
+    def metadata_failed(self, message):
+        self.loading = False
+        self.error(message)
 
     def metadata(self, result):
         self.branches, self.staffs, self.shifts = result
@@ -126,6 +168,7 @@ class ScheduleView(Page):
             combo.blockSignals(False)
         self.ready = True
         self.add_btn.setEnabled(True)
+        self.delete_btn.setEnabled(True)
         self.render_month_calendar()
 
     def render_month_calendar(self, *_):
@@ -138,16 +181,25 @@ class ScheduleView(Page):
         branch = self.branch_combo.currentData() if role == "admin" else self.current_profile["branch_id"]
         user = self.current_profile["id"] if role == "staff" else self.staff_combo.currentData()
         self.status.setText("Đang tải lịch làm việc…")
+        self.loading = True
         self.schedules = []
+        for day in self._marked_dates:
+            self.calendar.setDateTextFormat(day, QTextCharFormat())
+        self._marked_dates = []
         self.render_selected_day()
         self.tasks.submit(
             "calendar",
             lambda: self.supabase.get_schedules_range(branch, user, start, end),
             self.loaded,
-            self.error,
+            self.calendar_failed,
         )
 
+    def calendar_failed(self, message):
+        self.loaded([])
+        self.error(message)
+
     def loaded(self, records):
+        self.loading = False
         self.schedules = records
         for day in self._marked_dates:
             self.calendar.setDateTextFormat(day, QTextCharFormat())
@@ -155,20 +207,18 @@ class ScheduleView(Page):
         for value in {record.get("work_date") for record in records}:
             if value:
                 day = QDate.fromString(value, "yyyy-MM-dd")
-                style = QTextCharFormat()
-                style.setBackground(QColor("#244786"))
-                style.setForeground(QColor("#ffffff"))
-                self.calendar.setDateTextFormat(day, style)
                 self._marked_dates.append(day)
+        self.apply_calendar_theme()
         self.render_selected_day()
 
     def render_selected_day(self):
         selected = self.calendar.selectedDate().toString("yyyy-MM-dd")
         records = [r for r in self.schedules if r.get("work_date") == selected]
         self.model.replace(records)
-        self.status.setText(
-            f"Ngày {self.calendar.selectedDate().toString('dd/MM/yyyy')} · {len(records)} ca làm việc"
-        )
+        if not self.loading:
+            self.status.setText(
+                f"Ngày {self.calendar.selectedDate().toString('dd/MM/yyyy')} · {len(records)} ca làm việc"
+            )
 
     def open_attendance_history_modal(self):
         from views_qt.attendance_history_dialog import AttendanceHistoryDialog

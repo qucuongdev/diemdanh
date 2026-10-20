@@ -1,0 +1,93 @@
+# Cập nhật Supabase cho bản Qt
+
+App **1.0.0** yêu cầu backend **3**. Chỉ cài thư viện hoặc chạy lại Python không cập nhật được các hàm và quyền trong database.
+
+Ứng dụng kiểm tra `rpc_client_version()` sau khi xác thực tài khoản và đọc hồ sơ. Thiếu hàm, thiếu quyền gọi, phiên bản không khớp và lỗi mạng có thông báo riêng. App tiếp tục chặn truy cập nếu không xác nhận được backend tương thích.
+
+## Database đang có dữ liệu
+
+1. Sao lưu database, chọn đúng dự án Supabase và tạm dừng các bản app đang hoạt động trong thời gian cập nhật. Thử quy trình trên bản sao thử nghiệm trước khi áp dụng cho dữ liệu thật.
+2. Mở **SQL Editor** của dự án. Xem và chạy [preflight.sql](preflight.sql). File này chỉ đọc cấu trúc và số lượng vấn đề; không xuất mật khẩu hoặc bản ghi nhân viên. Cần có đủ 8 bảng của ứng dụng. Nếu chưa có bảng, dùng quy trình database mới bên dưới.
+3. Kiểm tra các số đếm xung đột. Nhiều admin, nhiều quản lý đang hoạt động cùng chi nhánh, nhân viên chưa có chi nhánh hoặc tài khoản thiếu email identity cần được quản trị viên xử lý riêng. Các migration không tự xóa hoặc sửa những hồ sơ này. `auth.identities` cần có `id` kiểu `uuid` và `provider_id` kiểu `text` cho migration 04.
+4. Xem xét rồi chạy lần lượt toàn bộ nội dung các file dưới đây trong SQL Editor, mỗi file một lần. Chỉ chuyển sang file tiếp theo khi file trước thành công.
+
+| Thứ tự | File | Mục đích |
+| --- | --- | --- |
+| 1 | [20261020_01_security_and_indexes.sql](migrations/20261020_01_security_and_indexes.sql) | Quyền theo vai trò/chi nhánh, bảo vệ yêu cầu, ảnh riêng tư, chỉ mục |
+| 2 | [20261020_02_admin_rpc.sql](migrations/20261020_02_admin_rpc.sql) | Các RPC quản trị nhân viên |
+| 3 | [20261020_03_attendance_rpc.sql](migrations/20261020_03_attendance_rpc.sql) | Chấm công bằng giờ máy chủ, kiểm tra thiết bị, xử lý duyệt nghỉ |
+| 4 | [20261020_04_qt_completion.sql](migrations/20261020_04_qt_completion.sql) | Bổ sung quyền bảng ca, bảo vệ ca đã chấm công, tạo Auth/identity nguyên tử, công bố backend 3 |
+
+Nếu chắc chắn đã áp dụng 01–03 đúng nội dung hiện tại, chỉ cần áp dụng 04. Nếu không biết trạng thái, đối chiếu lịch sử triển khai trước khi chạy; SQL Editor không tự ghi vào bảng lịch sử của công cụ `migrate.py`.
+
+Không chạy lại `schema.sql` trên database hiện có: file đó là nền ban đầu và chứa chính sách/RPC cũ. Không dùng file `update_admin_rpc.sql` để cập nhật bản Qt này. Các file migration 01–03 được giữ nguyên; bản sửa tiếp theo nằm ở 04.
+
+Mỗi migration có transaction riêng. Khi một file lỗi, toàn bộ thay đổi của file đó được rollback; các file đã chạy thành công trước đó vẫn còn. Dừng tại lỗi, xử lý nguyên nhân và chạy lại file bị lỗi trước khi mở app. Không chỉ tạo hàm trả về `3` để vượt kiểm tra phiên bản.
+
+## Database mới
+
+1. Tạo dự án Supabase và xem xét/chạy toàn bộ [schema.sql](schema.sql) một lần trong SQL Editor.
+2. Áp dụng đủ bốn migration ở trên trước khi đưa ứng dụng vào sử dụng. Schema ban đầu một mình chưa đáp ứng các yêu cầu của app.
+3. Tạo tài khoản chủ chuỗi bằng **Authentication → Users → Add user** của Supabase, dùng email và mật khẩu riêng; xác nhận email theo cấu hình dự án.
+4. Sao chép UUID của tài khoản vừa tạo. Trong phiên SQL Editor tin cậy, thêm hồ sơ bằng mẫu dưới đây sau khi thay UUID và họ tên. Đây là thao tác tạo hồ sơ thật, cần chọn đúng tài khoản trước khi chạy:
+
+```sql
+INSERT INTO public.profiles (id, full_name, role, is_active)
+VALUES ('<UUID-tai-khoan-auth>'::uuid, '<Ho-ten-chu-chuoi>', 'admin', true);
+```
+
+5. Điền public key và URL vào `.env` như README. Đăng nhập bằng email đầy đủ của chủ chuỗi, tạo chi nhánh, ca làm việc, nhân viên rồi cấp phép máy quầy trong màn **Quản trị**.
+
+Không có mật khẩu admin mặc định trong dự án. Mỗi hệ thống có tối đa một hồ sơ admin; không tạo admin thứ hai qua SQL để khắc phục lỗi của tài khoản đầu tiên.
+
+## Công cụ migration tùy chọn cho quản trị viên
+
+Không cần cài công cụ này để chạy app. Lệnh sau chỉ liệt kê file và checksum; không tải `.env` hoặc kết nối database:
+
+```bash
+python migrate.py --all-pending
+```
+
+Muốn chạy toàn bộ migration bằng một lệnh trong Git Bash, sau khi xem xét các file và đúng database:
+
+```bash
+python -m pip install -r requirements-admin.txt && python migrate.py --all-pending --apply
+```
+
+Công cụ tự lấy project ID từ `SUPABASE_URL` trong môi trường hoặc `.env`, tạo địa chỉ kết nối trực tiếp và chỉ hỏi **mật khẩu database Supabase** (ẩn khi nhập). Mật khẩu có ký tự đặc biệt được mã hóa URL tự động, giữ nguyên khoảng trắng. Mật khẩu database được đặt khi tạo dự án Supabase và được quản lý riêng với tài khoản đăng nhập ứng dụng. Chế độ chỉ xem danh sách migration không đọc `.env`.
+
+Kết nối trực tiếp cần IPv6 hoặc IPv4 add-on. Nếu mạng chỉ có IPv4, lấy URI **Session pooler** từ **Supabase → Connect**, giữ nguyên `[YOUR-PASSWORD]` rồi cấu hình địa chỉ này trong môi trường Git Bash (không chứa mật khẩu thật):
+
+```bash
+export SUPABASE_DB_URL='postgresql://postgres.<project-id>:[YOUR-PASSWORD]@<pooler-host>:5432/postgres?sslmode=require'
+python migrate.py --all-pending --apply
+```
+
+Thay `<project-id>` và `<pooler-host>` đúng theo dashboard. Công cụ vẫn chỉ hỏi mật khẩu. Không tự suy đoán host pooler từ vùng hoặc project ID. Nếu `SUPABASE_DB_URL` đã chứa mật khẩu đầy đủ, công cụ dùng giá trị đó mà không hỏi lại. Với domain API tùy chỉnh, cần cấu hình endpoint PostgreSQL qua biến này. Xem [hướng dẫn kết nối PostgreSQL của Supabase](https://supabase.com/docs/guides/database/connecting-to-postgres).
+
+Nếu Git Bash không hỗ trợ nhập ẩn, chạy phần migration bằng `winpty python migrate.py --all-pending --apply`. Công cụ sẽ dừng thay vì chuyển sang nhập hiện rõ mật khẩu.
+
+Lệnh có `--apply` thực sự thay đổi database. Công cụ ghi checksum vào `_schema_migrations`, bỏ qua file đã ghi nhận và từ chối file đã áp dụng nhưng bị sửa nội dung. Công cụ không lưu mật khẩu vừa nhập và chỉ lấy URL API công khai từ `.env` của desktop để suy ra project. Không đưa URL kết nối chứa mật khẩu hoặc service-role key vào gói ứng dụng, lệnh được chia sẻ hay ảnh chụp.
+
+Nếu dùng SQL Editor và CLI xen kẽ, phải đối chiếu lịch sử thủ công; công cụ không suy đoán file đã được chạy qua SQL Editor.
+
+## Kiểm tra sau cập nhật
+
+Đăng nhập lại app; không gọi `rpc_client_version()` trong SQL Editor rồi kết luận quyền người dùng đúng, vì phiên SQL Editor không mang danh tính Auth của nhân viên.
+
+- **Admin:** xem danh mục, tạo nhân viên thử nghiệm và xác nhận người đó đăng nhập được; không hạ quyền, khóa hoặc xóa admin.
+- **Quản lý:** chỉ xem/thao tác trong chi nhánh được gán; không duyệt yêu cầu của chính mình.
+- **Dược sĩ:** chỉ xem lịch/lịch sử cá nhân; máy chưa được cấp phép bị chặn. Các truy cập trái quyền cần bị backend từ chối cả khi bỏ qua giao diện.
+- **Chấm công:** thử bằng tài khoản và lịch riêng: bấm trùng, ca sai ngày, máy bị khóa, tan ca trước giờ, ca qua đêm và đồng thời duyệt nghỉ/vào ca.
+- **Ảnh:** người ngoài hoặc nhân viên khác không có quyền không xem được ảnh; quản lý đúng chi nhánh xem qua URL có thời hạn.
+- **Báo cáo:** đối chiếu số ca và giờ với dữ liệu thử, kiểm tra trên 500 bản ghi và xuất Excel.
+
+Các bước này có thể tạo dữ liệu nên dùng dự án thử nghiệm và tài khoản riêng. Chưa có bước nào được chạy trên backend thật trong lần sửa mã này.
+
+## Giới hạn cần biết
+
+- Migration 04 sửa cách tạo nhân viên mới, không tự sửa tài khoản cũ bị thiếu identity. Cấu trúc Auth do Supabase quản lý nên phải kiểm tra trên dự án triển khai. Xem [tài liệu Supabase về identities](https://supabase.com/docs/guides/auth/identities) và [migration Auth về khóa identity](https://github.com/supabase/auth/blob/master/migrations/20231117164230_add_id_pkey_identities.up.sql).
+- Các giá trị `created_at` cũ không được viết lại. Migration chỉ sửa mặc định cho bản ghi mới.
+- Mã thiết bị do client cung cấp, không phải chứng thực phần cứng bằng mật mã.
+- Duyệt ảnh chưa tự sửa giờ chấm công; chưa có luồng đổi ca tự động hoặc gói `.exe`.
+- Kiểm thử Qt/service, lint và parser SQL tại máy không thay thế kiểm thử RLS/RPC/Auth trên PostgreSQL và Supabase thật.

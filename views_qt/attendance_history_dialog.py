@@ -1,19 +1,16 @@
 from datetime import date
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QComboBox, QLineEdit
-from core.domain import display_time, local_now
+from core.domain import display_time, local_now, attendance_notes, timestamp_tooltip
 from views_qt.common import Page, TableModel, table_for, button, label
 
 
 def history_status(record):
-    values = []
-    if record.get("is_late"):
-        values.append(f"Muộn {record.get('late_minutes', 0)} phút")
-    if record.get("is_early_leave"):
-        values.append(f"Về sớm {record.get('early_minutes', 0)} phút")
-    if not record.get("check_out"):
-        values.append("Chưa tan ca")
-    return " · ".join(values) or "Đủ công"
+    state = "Đã check-out" if record.get("check_out") else "Chưa check-out"
+    notes = attendance_notes(record, include_unit=False)
+    if notes:
+        return notes if record.get("check_out") else f"{notes} · {state}"
+    return state
 
 
 class HistoryPage(Page):
@@ -44,9 +41,11 @@ class HistoryPage(Page):
                 ("Chi nhánh", lambda r: (r.get("branches") or {}).get("name")),
                 ("Ngày", lambda r: (r.get("schedules") or {}).get("work_date")),
                 ("Ca", lambda r: ((r.get("schedules") or {}).get("shifts") or {}).get("name")),
-                ("Vào ca", lambda r: display_time(r.get("check_in"))),
-                ("Tan ca", lambda r: display_time(r.get("check_out"))),
-                ("Trạng thái", history_status),
+                ("Check-in", lambda r: display_time(r.get("check_in")),
+                 lambda r: timestamp_tooltip(r.get("check_in"))),
+                ("Check-out", lambda r: display_time(r.get("check_out")),
+                 lambda r: timestamp_tooltip(r.get("check_out"))),
+                ("Trạng thái (giờ:phút)", history_status),
             ],
             self,
         )
@@ -114,6 +113,10 @@ class HistoryPage(Page):
         if not self.ready:
             return
         self.tasks.cancel("history")
+        self.model.replace([])
+        self.summary.clear()
+        self.prev_btn.setEnabled(False)
+        self.next_btn.setEnabled(False)
         raw = self.date_entry.text().strip()
         try:
             if raw:
@@ -139,6 +142,8 @@ class HistoryPage(Page):
         )
 
     def load_error(self, message):
+        self.model.replace([])
+        self.summary.clear()
         self.error(message)
         self.prev_btn.setEnabled(self.offset > 0)
 

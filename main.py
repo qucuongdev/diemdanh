@@ -8,7 +8,7 @@ from core.domain import ROLES, validate_profile
 from core.qt_worker import QtWorker, TaskRunner
 from core.supabase_service import SupabaseService
 from views_qt.common import label, button
-from views_qt.qt_theme import configure_application
+from views_qt.qt_theme import configure_application, ThemeToggleButton
 from views_qt.login_view import LoginView
 
 
@@ -37,6 +37,8 @@ class MainAppWidget(QWidget):
         self.menu_layout = QVBoxLayout()
         layout.addLayout(self.menu_layout)
         layout.addStretch()
+        self.theme_button = ThemeToggleButton(self)
+        layout.addWidget(self.theme_button)
         layout.addWidget(button("Đăng xuất", self.handle_logout))
         root.addWidget(sidebar)
         self.content_stack = QStackedWidget()
@@ -63,7 +65,7 @@ class MainAppWidget(QWidget):
         self.current_profile = profile
         role = profile["role"]
         self.role_badge.setText(ROLES[role])
-        items = [("attendance", "Điểm danh"), ("schedule", "Lịch làm việc")]
+        items = [("attendance", "Check-in / Check-out"), ("schedule", "Lịch làm việc")]
         if role in ("admin", "storemanager"):
             items += [("approval", "Duyệt yêu cầu"), ("reports", "Báo cáo")]
         if role == "admin":
@@ -78,6 +80,10 @@ class MainAppWidget(QWidget):
         # Guard direct calls as well as visible navigation.
         if key not in self.nav_buttons:
             return
+        if self.active_nav_key != key:
+            previous = self.views.get(self.active_nav_key)
+            if previous is not None and hasattr(previous, "on_hide"):
+                previous.on_hide()
         if key not in self.views:
             if key == "attendance":
                 from views_qt.attendance_view import AttendanceView

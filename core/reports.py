@@ -2,6 +2,7 @@
 
 import os
 import tempfile
+from datetime import timedelta
 from pathlib import Path
 import openpyxl
 from openpyxl.styles import Font, PatternFill
@@ -46,9 +47,10 @@ def export_attendance(path, schedules, title):
     sheet = workbook.active
     sheet.title = "Chấm công"
     sheet.append([safe_excel_text(title)])
-    sheet.append(["STT", "Họ tên", "Ngày", "Ca", "Vào ca", "Tan ca", "Phút trễ", "Trạng thái"])
+    sheet.append(["STT", "Họ tên", "Ngày", "Ca", "Check-in", "Check-out", "Muộn (giờ:phút)", "Trạng thái"])
     for number, schedule in enumerate(schedules, 1):
         attendance = first_attendance(schedule)
+        minutes = attendance.get("late_minutes")
         sheet.append(
             [
                 number,
@@ -57,7 +59,7 @@ def export_attendance(path, schedules, title):
                 safe_excel_text((schedule.get("shifts") or {}).get("name")),
                 display_time(attendance.get("check_in")),
                 display_time(attendance.get("check_out")),
-                attendance.get("late_minutes") or 0,
+                timedelta(minutes=minutes) if type(minutes) is int and minutes >= 0 else None,
                 {
                     "leave": "Nghỉ phép",
                     "scheduled": "Đã xếp ca",
@@ -66,10 +68,11 @@ def export_attendance(path, schedules, title):
                 }.get(schedule.get("status"), "Không rõ"),
             ]
         )
+        sheet.cell(number + 2, 7).number_format = "[h]:mm"
     for cell in sheet[2]:
         cell.font = Font(bold=True, color="FFFFFF")
         cell.fill = PatternFill("solid", fgColor="2563EB")
-    for column, width in {"A": 8, "B": 32, "C": 16, "D": 24, "E": 16, "F": 16, "G": 14, "H": 20}.items():
+    for column, width in {"A": 8, "B": 32, "C": 16, "D": 24, "E": 16, "F": 16, "G": 22, "H": 20}.items():
         sheet.column_dimensions[column].width = width
     sheet.freeze_panes = "A3"
     sheet.auto_filter.ref = f"A2:H{sheet.max_row}"

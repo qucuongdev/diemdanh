@@ -9,10 +9,12 @@ class SettingsView(Page):
     def __init__(self, parent=None, current_profile=None):
         super().__init__(parent, current_profile)
         self.data = {}
+        self.ready = False
         self.current_device_uuid = ""
         self.heading("Quản trị hệ thống", "Quản lý danh mục, thiết bị và quyền truy cập của nhân viên.")
         toolbar = QHBoxLayout()
         self.kind = QComboBox()
+        self.kind.setMinimumWidth(180)
         for caption, value in [
             ("Chi nhánh", "branches"),
             ("Ca làm việc", "shifts"),
@@ -47,10 +49,16 @@ class SettingsView(Page):
             QApplication.clipboard().setText(self.current_device_uuid)
             self.status.setText("Đã sao chép mã máy.")
 
+    def on_show(self):
+        if self.ready:
+            self.refresh()
+
     def refresh(self):
         if self.current_profile.get("role") != "admin":
             self.error("Chỉ chủ chuỗi có quyền quản trị hệ thống.")
             return
+        self.ready = False
+        self.model.replace([])
         self.add_btn.setEnabled(False)
         self.edit_btn.setEnabled(False)
         self.delete_btn.setEnabled(False)
@@ -67,6 +75,7 @@ class SettingsView(Page):
 
         def done(data):
             self.data = data
+            self.ready = True
             self.current_device_uuid = data["identity"]
             self.device_label.setText(f"Mã máy hiện tại: {self.current_device_uuid}")
             self.add_btn.setEnabled(True)
@@ -77,8 +86,8 @@ class SettingsView(Page):
     def selection_changed(self, *_):
         record = self.selected(self.table)
         protected = bool(record) and self.kind.currentData() == "staff" and record.get("role") == "admin"
-        self.edit_btn.setEnabled(bool(record) and not protected)
-        self.delete_btn.setEnabled(bool(record) and not protected)
+        self.edit_btn.setEnabled(self.ready and bool(record) and not protected)
+        self.delete_btn.setEnabled(self.ready and bool(record) and not protected)
 
     def render(self, *_):
         kind = self.kind.currentData()
@@ -110,7 +119,7 @@ class SettingsView(Page):
         }
         self.model.beginResetModel()
         self.model.columns = columns[kind]
-        self.model.records = list(self.data.get(kind, []))
+        self.model.records = list(self.data.get(kind, [])) if self.ready else []
         self.model.endResetModel()
         self.status.setText(f"{len(self.model.records)} mục · {self.kind.currentText()}")
         self.selection_changed()
@@ -124,7 +133,7 @@ class SettingsView(Page):
             self.form(record)
 
     def form(self, record):
-        if not self.data or self.current_profile["role"] != "admin":
+        if not self.ready or self.current_profile["role"] != "admin":
             return
         kind = self.kind.currentData()
         original = record or {}
@@ -157,6 +166,8 @@ class SettingsView(Page):
                 ("active", "Trạng thái", [("Hoạt động", True), ("Tạm khóa", False)]),
             ],
         }[kind]
+        if record is None and kind in ("staff", "devices"):
+            fields = [field for field in fields if field[0] != "active"]
         if kind == "staff" and record is None:
             fields = [("email", "Email", ""), ("password", "Mật khẩu (ít nhất 12 ký tự)", "")] + fields
         dialog = FormDialog(
