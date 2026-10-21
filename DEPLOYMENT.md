@@ -1,8 +1,8 @@
 # Cập nhật Supabase cho bản Qt
 
-App **1.0.0** yêu cầu backend **3**. Chỉ cài thư viện hoặc chạy lại Python không cập nhật được các hàm và quyền trong database.
+App **1.0.0** hiện yêu cầu backend **4** cho nhân sự và bảng lương. Chỉ cài thư viện hoặc chạy lại Python không cập nhật được các hàm và quyền trong database.
 
-Ứng dụng kiểm tra `rpc_client_version()` sau khi xác thực tài khoản và đọc hồ sơ. Thiếu hàm, thiếu quyền gọi, phiên bản không khớp và lỗi mạng có thông báo riêng. App tiếp tục chặn truy cập nếu không xác nhận được backend tương thích.
+Ứng dụng kiểm tra `rpc_client_version()` sau khi xác thực tài khoản và đọc hồ sơ. UI chỉ hiện thông báo chung khi gặp lỗi kỹ thuật; không hiện phiên bản backend, tên hàm, migration, cấu hình hay ngoại lệ. App tiếp tục chặn truy cập nếu không xác nhận được backend tương thích. Thông tin kỹ thuật trong tài liệu này chỉ dành cho quản trị triển khai.
 
 ## Database đang có dữ liệu
 
@@ -17,17 +17,18 @@ App **1.0.0** yêu cầu backend **3**. Chỉ cài thư viện hoặc chạy l�
 | 2 | [20261020_02_admin_rpc.sql](migrations/20261020_02_admin_rpc.sql) | Các RPC quản trị nhân viên |
 | 3 | [20261020_03_attendance_rpc.sql](migrations/20261020_03_attendance_rpc.sql) | Chấm công bằng giờ máy chủ, kiểm tra thiết bị, xử lý duyệt nghỉ |
 | 4 | [20261020_04_qt_completion.sql](migrations/20261020_04_qt_completion.sql) | Bổ sung quyền bảng ca, bảo vệ ca đã chấm công, tạo Auth/identity nguyên tử, công bố backend 3 |
+| 5 | [20261021_05_personnel_payroll.sql](migrations/20261021_05_personnel_payroll.sql) | Hồ sơ riêng, chế độ lương có hiệu lực theo tháng, tính/chốt lương, nhắc sinh nhật và backend 4 |
 
-Nếu chắc chắn đã áp dụng 01–03 đúng nội dung hiện tại, chỉ cần áp dụng 04. Nếu không biết trạng thái, đối chiếu lịch sử triển khai trước khi chạy; SQL Editor không tự ghi vào bảng lịch sử của công cụ `migrate.py`.
+Nếu chắc chắn đã áp dụng 01–04 đúng nội dung hiện tại, chỉ cần áp dụng 05. Nếu mới có 01–03, áp dụng 04 rồi 05. Nếu không biết trạng thái, đối chiếu lịch sử triển khai trước khi chạy; SQL Editor không tự ghi vào bảng lịch sử của công cụ `migrate.py`.
 
-Không chạy lại `schema.sql` trên database hiện có: file đó là nền ban đầu và chứa chính sách/RPC cũ. Không dùng file `update_admin_rpc.sql` để cập nhật bản Qt này. Các file migration 01–03 được giữ nguyên; bản sửa tiếp theo nằm ở 04.
+Không chạy lại `schema.sql` trên database hiện có: file đó là nền ban đầu và chứa chính sách/RPC cũ. Không dùng file `update_admin_rpc.sql` để cập nhật bản Qt này. Các file migration 01–04 được giữ nguyên; phần nhân sự/lương mới nằm ở 05. `preflight.sql` kiểm tra cấu trúc nền, không xác nhận nghiệp vụ hoặc bảng lương mới.
 
 Mỗi migration có transaction riêng. Khi một file lỗi, toàn bộ thay đổi của file đó được rollback; các file đã chạy thành công trước đó vẫn còn. Dừng tại lỗi, xử lý nguyên nhân và chạy lại file bị lỗi trước khi mở app. Không chỉ tạo hàm trả về `3` để vượt kiểm tra phiên bản.
 
 ## Database mới
 
 1. Tạo dự án Supabase và xem xét/chạy toàn bộ [schema.sql](schema.sql) một lần trong SQL Editor.
-2. Áp dụng đủ bốn migration ở trên trước khi đưa ứng dụng vào sử dụng. Schema ban đầu một mình chưa đáp ứng các yêu cầu của app.
+2. Áp dụng đủ năm migration ở trên trước khi đưa ứng dụng vào sử dụng. Schema ban đầu một mình chưa đáp ứng các yêu cầu của app.
 3. Tạo tài khoản chủ chuỗi bằng **Authentication → Users → Add user** của Supabase, dùng email và mật khẩu riêng; xác nhận email theo cấu hình dự án.
 4. Sao chép UUID của tài khoản vừa tạo. Trong phiên SQL Editor tin cậy, thêm hồ sơ bằng mẫu dưới đây sau khi thay UUID và họ tên. Đây là thao tác tạo hồ sơ thật, cần chọn đúng tài khoản trước khi chạy:
 
@@ -71,6 +72,8 @@ Lệnh có `--apply` thực sự thay đổi database. Công cụ ghi checksum v
 
 Nếu dùng SQL Editor và CLI xen kẽ, phải đối chiếu lịch sử thủ công; công cụ không suy đoán file đã được chạy qua SQL Editor.
 
+Công cụ từ chối áp dụng một migration cũ chưa có lịch sử CLI nếu đã ghi nhận migration mới hơn, tránh vô tình thay hàm mới bằng bản cũ. Không tự thêm checksum cho file chưa xác minh. Nếu 01–04 đã chạy qua SQL Editor và 05 đã ghi nhận bằng CLI, không chạy lại `--all-pending --apply`; dùng đúng file mới đã được review. Chạy lại riêng file 05 đúng checksum chỉ được bỏ qua, không thực thi lại.
+
 ## Kiểm tra sau cập nhật
 
 Đăng nhập lại app; không gọi `rpc_client_version()` trong SQL Editor rồi kết luận quyền người dùng đúng, vì phiên SQL Editor không mang danh tính Auth của nhân viên.
@@ -81,6 +84,8 @@ Nếu dùng SQL Editor và CLI xen kẽ, phải đối chiếu lịch sử thủ
 - **Chấm công:** thử bằng tài khoản và lịch riêng: bấm trùng, ca sai ngày, máy bị khóa, tan ca trước giờ, ca qua đêm và đồng thời duyệt nghỉ/vào ca.
 - **Ảnh:** người ngoài hoặc nhân viên khác không có quyền không xem được ảnh; quản lý đúng chi nhánh xem qua URL có thời hạn.
 - **Báo cáo:** đối chiếu số ca và giờ với dữ liệu thử, kiểm tra trên 500 bản ghi và xuất Excel.
+- **Nhân sự/lương:** đọc [PAYROLL.md](PAYROLL.md), đặt chế độ từng nhân viên, đối chiếu tháng 28/29/30/31 ngày, đi muộn, nghỉ hưởng/không hưởng lương và làm thêm ngày nghỉ. Thử chốt bằng dữ liệu cũ, chốt đồng thời với cập nhật công/chế độ, đổi chi nhánh sau chốt, và xác nhận quản lý/dược sĩ không thể đọc CCCD/ngân hàng/lương qua RPC hoặc bảng trực tiếp.
+- **Sinh nhật:** thử ngày hiện tại, ngưỡng nhắc riêng và 29/02; thử đăng xuất khi yêu cầu nhắc còn chạy. Snapshot và hồ sơ mới ngăn xóa nhân viên; dùng ngày nghỉ việc và khóa tài khoản để lưu lịch sử.
 
 Các bước này có thể tạo dữ liệu nên dùng dự án thử nghiệm và tài khoản riêng. Chưa có bước nào được chạy trên backend thật trong lần sửa mã này.
 
@@ -91,3 +96,4 @@ Các bước này có thể tạo dữ liệu nên dùng dự án thử nghiệm
 - Mã thiết bị do client cung cấp, không phải chứng thực phần cứng bằng mật mã.
 - Duyệt ảnh chưa tự sửa giờ chấm công; chưa có luồng đổi ca tự động hoặc gói `.exe`.
 - Kiểm thử Qt/service, lint và parser SQL tại máy không thay thế kiểm thử RLS/RPC/Auth trên PostgreSQL và Supabase thật.
+- QA SQL migration 05 đã chạy trên PostgreSQL trong bộ nhớ bằng schema tối thiểu/Auth giả lập. Ngày 21/10/2026, theo yêu cầu người dùng, 05 đã commit trên Supabase và đã đối chiếu checksum/backend 4/RLS/quyền bảng mới. Chưa nghiệm thu Auth/PostgREST bằng tài khoản thật, giao dịch đồng thời hoặc dữ liệu lớn; chưa kiểm thử chạy mới toàn bộ 01–05 trên cùng backend thử. Chưa có thuế/bảo hiểm/hệ số lễ, mở lại tháng đã chốt hay tự chuyển tiền lương.

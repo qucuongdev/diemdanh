@@ -157,7 +157,7 @@ class ScheduleView(Page):
             self.staff_combo.addItem("Tất cả nhân viên", None)
             for item in self.staffs:
                 if role == "admin" or item.get("branch_id") == self.current_profile["branch_id"]:
-                    self.staff_combo.addItem(f"{item['full_name']} · {item['id'][:6]}", item["id"])
+                    self.staff_combo.addItem(item["full_name"], item["id"])
         else:
             self.staff_combo.addItem(self.current_profile.get("full_name", "Tôi"), self.current_profile["id"])
             self.staff_combo.setEnabled(False)
@@ -257,7 +257,7 @@ class ScheduleView(Page):
                 combo.clear()
                 for item in items:
                     if item.get("branch_id") == branch and item.get("is_active", True):
-                        combo.addItem(f"{item[caption]} · {item['id'][:6]}", item["id"])
+                        combo.addItem(item[caption], item["id"])
 
         dialog.fields["branch"].currentIndexChanged.connect(update_choices)
         update_choices()

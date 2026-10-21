@@ -117,6 +117,7 @@ def fake_service():
     service.get_allowed_devices.return_value = []
     service.get_monthly_attendance_data.return_value = [schedule]
     service.get_attendance_history.return_value = []
+    service.get_upcoming_birthdays.return_value = {"success": True, "data": []}
     service.login.return_value = {"success": True, "profile": STAFF}
     service.logout.return_value = None
     return service
@@ -136,6 +137,37 @@ class WorkerTests(unittest.TestCase):
         )
         until(lambda: bool(result))
         self.assertEqual(result[0], (42, APP.thread()))
+        owner.deleteLater()
+
+    def test_gui_callback_failure_routes_to_custom_error_without_raw_traceback(self):
+        from core.ui_messages import SYSTEM_UNAVAILABLE
+        owner = QWidget()
+        runner = TaskRunner(owner)
+        errors = []
+
+        def broken_callback(value):
+            raise ValueError("SQL query token=TOP_SECRET")
+
+        with self.assertLogs("core.qt_worker", level="WARNING") as captured:
+            runner.submit("read", lambda: 42, broken_callback, errors.append)
+            until(lambda: bool(errors))
+        self.assertEqual(errors, [SYSTEM_UNAVAILABLE])
+        self.assertNotIn("TOP_SECRET", "\n".join(captured.output))
+        self.assertNotIn("Traceback", "\n".join(captured.output))
+        owner.deleteLater()
+
+    def test_error_callback_failure_is_not_logged_with_server_payload(self):
+        owner = QWidget()
+        runner = TaskRunner(owner)
+
+        def broken_error(message):
+            raise RuntimeError("DO_NOT_DISPLAY raw server exception")
+
+        with self.assertLogs("core.qt_worker", level="WARNING") as captured:
+            runner.submit("read", lambda: None, lambda value: (_ for _ in ()).throw(ValueError()), broken_error)
+            until(lambda: not QtWorker.busy())
+        self.assertNotIn("DO_NOT_DISPLAY", "\n".join(captured.output))
+        self.assertNotIn("Traceback", "\n".join(captured.output))
         owner.deleteLater()
 
     def test_latest_request_wins_and_intermediate_requests_are_coalesced(self):
@@ -216,7 +248,7 @@ class UiTests(unittest.TestCase):
 
     def test_role_navigation_and_logout_clears_views(self):
         self.login()
-        self.assertEqual(len(self.window.main_app_widget.nav_buttons), 5)
+        self.assertEqual(len(self.window.main_app_widget.nav_buttons), 6)
         self.window.show_login_view()
         until(lambda: self.window.root_stack.currentIndex() == 0)
         self.service.logout.assert_called()
@@ -248,17 +280,19 @@ class UiTests(unittest.TestCase):
         self.assertTrue(self.window.grab().save(str(folder / "login.png")))
 
     def test_unexpected_device_check_failure_logs_out_and_restores_login(self):
-        self.service.check_device_permission.side_effect = RuntimeError("secret device failure")
-        login = self.window.login_view
-        login.email_entry.setText("staff")
-        login.pass_entry.setText("test-password")
-        login.handle_login()
-        until(lambda: not login.busy)
-        self.service.logout.assert_called_once()
-        self.assertEqual(self.window.root_stack.currentIndex(), 0)
-        self.assertTrue(login.login_btn.isEnabled())
-        self.assertEqual(login.pass_entry.text(), "")
-        self.assertNotIn("secret", login.error_label.text())
+        for failure in [RuntimeError("secret device failure"), ValueError("secret hardware system failure")]:
+            self.service.logout.reset_mock()
+            self.service.check_device_permission.side_effect = failure
+            login = self.window.login_view
+            login.email_entry.setText("staff")
+            login.pass_entry.setText("test-password")
+            login.handle_login()
+            until(lambda login=login: not login.busy)
+            self.service.logout.assert_called_once()
+            self.assertEqual(self.window.root_stack.currentIndex(), 0)
+            self.assertTrue(login.login_btn.isEnabled())
+            self.assertEqual(login.pass_entry.text(), "")
+            self.assertNotIn("secret", login.error_label.text())
 
     def test_attendance_rejection_remains_visible_without_being_overwritten(self):
         self.login(STAFF)
@@ -283,7 +317,7 @@ class UiTests(unittest.TestCase):
         view.handle_check_in()
         until(lambda: not view.busy and not view.loading)
         self.assertEqual(view.status.text(), "Check-in thành công.")
-        self.assertIn("Muộn 00:02 (giờ:phút)", view.detail.text())
+        self.assertIn("Muộn 2 phút", view.detail.text())
         self.assertIn("08:01:30", view.detail.toolTip())
 
     def test_failed_schedule_refresh_does_not_leave_actionable_old_shift(self):
@@ -518,13 +552,37 @@ class UiTests(unittest.TestCase):
         self.assertGreater(view.table.columnWidth(1), view.table.columnWidth(4))
         self.assertLess(view.table.columnWidth(4), view.table.viewport().width() * 0.4)
 
-    def test_history_flags_are_hours_minutes_and_checkout_is_not_full_credit(self):
-        from views_qt.attendance_history_dialog import history_status
+    def test_history_work_hours_and_status_colors_follow_theme(self):
+        from PySide6.QtGui import QColor
+        from views_qt.attendance_history_dialog import AttendanceHistoryDialog
 
-        self.assertEqual(history_status({"check_out": "done", "is_late": True, "late_minutes": 369}),
-                         "Muộn 06:09")
-        self.assertEqual(history_status({"check_out": None, "is_early_leave": True, "early_minutes": 5}),
-                         "Về sớm 00:05 · Chưa check-out")
+        dialog = AttendanceHistoryDialog(self.window, ADMIN)
+        self.addCleanup(dialog.close)
+        until(lambda: dialog.page.ready and not QtWorker.busy())
+        model = dialog.page.model
+        base = {"check_in": "2026-10-21T01:00:00Z", "check_out": "2026-10-21T09:00:00Z",
+                "schedules": {"work_date": "2026-10-21", "shifts": {
+                    "start_time": "08:00:00", "end_time": "16:00:00"}}}
+        model.replace([base, {**base, "check_in": "2026-10-21T01:15:00Z"},
+                       {**base, "check_out": None}, {**base, "schedules": None},
+                       {**base, "check_in": "2026-10-21T02:00:00Z"},
+                       {**base, "check_in": "2026-10-21T08:01:00Z"}])
+        columns = {col[0]: i for i, col in enumerate(model.columns)}
+        hours, status = columns["Giờ làm"], columns["Trạng thái"]
+        for row, expected_hours, expected_status in [
+            (0, "08:00", "● Done"), (1, "07:45", "● Thiếu 15 phút"),
+            (2, "—", "Chưa check-out"), (3, "—", "Không đủ dữ liệu"),
+            (4, "07:00", "● Thiếu 01:00"), (5, "59 phút", "● Thiếu 07:01"),
+        ]:
+            self.assertEqual(model.data(model.index(row, hours)), expected_hours)
+            self.assertEqual(model.data(model.index(row, status)), expected_status)
+        for mode, colors in THEMES.items():
+            APP.theme_manager.set_mode(mode)
+            APP.processEvents()
+            for row, token in [(0, "success"), (1, "error")]:
+                self.assertEqual(model.data(model.index(row, status), Qt.ItemDataRole.ForegroundRole),
+                                 QColor(colors[token]))
+            self.assertIsNone(model.data(model.index(2, status), Qt.ItemDataRole.ForegroundRole))
 
     def test_form_buttons_are_vietnamese_in_both_themes(self):
         from PySide6.QtWidgets import QDialogButtonBox

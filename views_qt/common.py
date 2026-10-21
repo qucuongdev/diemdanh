@@ -1,5 +1,7 @@
 """Shared native Qt tables, forms and task-aware page behavior."""
 
+import logging
+
 from PySide6.QtCore import QAbstractTableModel, Qt
 from PySide6.QtWidgets import (
     QWidget,
@@ -16,6 +18,7 @@ from PySide6.QtWidgets import (
     QLineEdit,
 )
 from core.qt_worker import TaskRunner
+from core.ui_messages import public_error_message, SYSTEM_UNAVAILABLE
 
 
 class TableModel(QAbstractTableModel):
@@ -23,6 +26,7 @@ class TableModel(QAbstractTableModel):
         super().__init__(parent)
         self.columns = columns
         self.records = []
+        self._render_error_logged = False
 
     def rowCount(self, parent=None):
         return 0 if parent is not None and parent.isValid() else len(self.records)
@@ -33,10 +37,16 @@ class TableModel(QAbstractTableModel):
     def data(self, index, role=Qt.ItemDataRole.DisplayRole):
         if not index.isValid() or role not in (Qt.ItemDataRole.DisplayRole, Qt.ItemDataRole.ToolTipRole):
             return None
-        column = self.columns[index.column()]
-        renderer = column[2] if role == Qt.ItemDataRole.ToolTipRole and len(column) > 2 else column[1]
-        value = renderer(self.records[index.row()])
-        return str(value if value is not None else "—")
+        try:
+            column = self.columns[index.column()]
+            renderer = column[2] if role == Qt.ItemDataRole.ToolTipRole and len(column) > 2 else column[1]
+            value = renderer(self.records[index.row()])
+            return str(value if value is not None else "—")
+        except Exception as exc:
+            if not self._render_error_logged:
+                logging.getLogger(__name__).warning("Table display failed: %s", type(exc).__name__)
+                self._render_error_logged = True
+            return SYSTEM_UNAVAILABLE if role == Qt.ItemDataRole.ToolTipRole else "—"
 
     def headerData(self, section, orientation, role=Qt.ItemDataRole.DisplayRole):
         if role == Qt.ItemDataRole.DisplayRole and orientation == Qt.Orientation.Horizontal:
@@ -46,6 +56,7 @@ class TableModel(QAbstractTableModel):
     def replace(self, records):
         self.beginResetModel()
         self.records = list(records)
+        self._render_error_logged = False
         self.endResetModel()
 
 
@@ -65,8 +76,10 @@ class DataTableView(QTableView):
             "Địa chỉ": (360, 180), "Nội dung": (360, 180), "Trạng thái": (240, 150),
             "Mã máy": (300, 180), "Tên máy": (220, 160), "Ca": (180, 120),
             "Ca làm": (180, 120), "Tên ca": (180, 120), "Điện thoại": (160, 130),
-            "Ngày": (130, 110), "Ngày ca": (130, 110), "Muộn (giờ:phút)": (190, 150),
-            "Trạng thái (giờ:phút)": (280, 210),
+            "Ngày": (130, 110), "Ngày ca": (130, 110), "Thời gian muộn": (190, 150),
+            "Lương tháng": (190, 150), "Tiền trừ": (180, 150), "Làm thêm": (180, 150),
+            "Chuyên cần": (180, 150), "Thực nhận": (200, 160), "Giờ làm": (130, 100),
+            "Loại ngày": (240, 180), "Ghi chú": (260, 180), "Cảnh báo": (320, 200),
         }
         sizes = [widths.get(column[0], (110, 80)) for column in model.columns]
         minimum = [max(size[1], self.fontMetrics().horizontalAdvance(column[0]) + 28)
@@ -131,7 +144,7 @@ class StatusLabel(QLabel):
         self.style().polish(self)
 
     def set_error(self, text):
-        self.setText(text)
+        self.setText(public_error_message(text))
         self.setProperty("error", True)
         self.style().unpolish(self)
         self.style().polish(self)
@@ -174,8 +187,11 @@ class Page(QWidget):
 
         def done(result):
             restore()
-            if not isinstance(result, dict) or not result.get("success"):
-                failed((result or {}).get("message", "Thao tác không thành công."))
+            if not isinstance(result, dict):
+                failed(SYSTEM_UNAVAILABLE)
+                return
+            if result.get("success") is not True:
+                failed(result.get("message", SYSTEM_UNAVAILABLE))
                 return
             self.status.setText("Đã lưu thay đổi.")
             on_done()
@@ -233,11 +249,14 @@ class FormDialog(QDialog):
 
         def error(message):
             self.buttons.setEnabled(True)
-            self.message.setText(message)
+            self.message.setText(public_error_message(message))
 
         def done(result):
-            if not result.get("success"):
-                error(result.get("message", "Không thể lưu thay đổi."))
+            if not isinstance(result, dict):
+                error(SYSTEM_UNAVAILABLE)
+                return
+            if result.get("success") is not True:
+                error(result.get("message", SYSTEM_UNAVAILABLE))
                 return
             self.accept()
             on_success()

@@ -4,7 +4,8 @@ import sys
 from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QStackedWidget
 from core.config import APP_NAME, APP_VERSION
-from core.domain import ROLES, validate_profile
+from core.domain import ROLES, validate_profile, local_now
+from core.ui_messages import UserInputError, SYSTEM_UNAVAILABLE
 from core.qt_worker import QtWorker, TaskRunner
 from core.supabase_service import SupabaseService
 from views_qt.common import label, button
@@ -33,6 +34,9 @@ class MainAppWidget(QWidget):
         layout.addWidget(label("Quản lý chấm công"))
         self.role_badge = label()
         layout.addWidget(self.role_badge)
+        self.birthday_notice = label()
+        self.birthday_notice.hide()
+        layout.addWidget(self.birthday_notice)
         layout.addSpacing(28)
         self.menu_layout = QVBoxLayout()
         layout.addLayout(self.menu_layout)
@@ -58,6 +62,8 @@ class MainAppWidget(QWidget):
         self.views.clear()
         self.current_profile = None
         self.active_nav_key = None
+        self.birthday_notice.clear()
+        self.birthday_notice.hide()
 
     def configure_user(self, profile):
         validate_profile(profile)
@@ -69,7 +75,7 @@ class MainAppWidget(QWidget):
         if role in ("admin", "storemanager"):
             items += [("approval", "Duyệt yêu cầu"), ("reports", "Báo cáo")]
         if role == "admin":
-            items += [("settings", "Quản trị")]
+            items += [("payroll", "Nhân sự và lương"), ("settings", "Quản trị")]
         for key, text in items:
             btn = button(text, lambda checked=False, key=key: self.show_view(key))
             self.menu_layout.addWidget(btn)
@@ -101,6 +107,10 @@ class MainAppWidget(QWidget):
                 from views_qt.report_view import ReportView
 
                 view = ReportView(self, self.current_profile)
+            elif key == "payroll":
+                from views_qt.payroll_view import PayrollView
+
+                view = PayrollView(self, self.current_profile)
             else:
                 from views_qt.settings_view import SettingsView
 
@@ -143,22 +153,58 @@ class MainWindow(QMainWindow):
         self._drain_timer = QTimer(self)
         self._drain_timer.setInterval(50)
         self._drain_timer.timeout.connect(self._drain)
+        self._birthday_day = None
+        self._birthday_timer = QTimer(self)
+        self._birthday_timer.setInterval(60000)
+        self._birthday_timer.timeout.connect(self.refresh_birthdays)
+        self._birthday_timer.start()
 
     def on_login_success(self, profile):
         try:
             validate_profile(profile)
-        except ValueError as exc:
+        except UserInputError as exc:
             self.login_view._on_auth_error(str(exc))
+            self.show_login_view()
+            return
+        except Exception:
+            self.login_view._on_auth_error(SYSTEM_UNAVAILABLE)
             self.show_login_view()
             return
         self.current_profile = profile
         self.main_app_widget.configure_user(profile)
         self.root_stack.setCurrentIndex(1)
+        self.refresh_birthdays()
+
+    def refresh_birthdays(self):
+        if not self.current_profile or self.current_profile.get("role") != "admin":
+            return
+        today = local_now().date()
+        if self._birthday_day == today:
+            return
+        self._birthday_day = today
+
+        def done(response):
+            if not self.current_profile or self.current_profile.get("role") != "admin":
+                return
+            notice = self.main_app_widget.birthday_notice
+            if not response.get("success"):
+                self._birthday_day = None
+                notice.setText("Chưa tải được nhắc sinh nhật. Xem Nhân sự và lương.")
+                notice.show()
+                return
+            rows = response.get("data") or []
+            notice.setText("Có sinh nhật sắp tới/hôm nay.\nXem Nhân sự và lương → Sinh nhật." if rows else "")
+            notice.setVisible(bool(rows))
+
+        self.tasks.submit("birthdays", lambda: self.supabase.get_upcoming_birthdays(0, 1), done,
+                          lambda message: done({"success": False}))
 
     def show_login_view(self):
         if self._logging_out:
             return
         self._logging_out = True
+        self.tasks.cancel("birthdays")
+        self._birthday_day = None
         self.current_profile = None
         self.main_app_widget.clear_session()
         self.setEnabled(False)

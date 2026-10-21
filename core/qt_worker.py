@@ -6,8 +6,9 @@ import weakref
 
 from PySide6.QtCore import QObject, QThread, Qt, Signal, Slot
 from shiboken6 import isValid
+from core.ui_messages import SYSTEM_UNAVAILABLE
 
-ERROR_MESSAGE = "Không thể hoàn tất thao tác. Kiểm tra kết nối và thử lại."
+ERROR_MESSAGE = SYSTEM_UNAVAILABLE
 
 
 class QtWorker(QThread):
@@ -108,8 +109,13 @@ class TaskRunner(QObject):
             if not self._closed and self._versions.get(key) == version:
                 try:
                     (on_result if success else on_error)(value)
-                except Exception:
-                    logging.getLogger(__name__).exception("GUI task callback failed")
+                except Exception as exc:
+                    logging.getLogger(__name__).warning("GUI task callback failed: %s", type(exc).__name__)
+                    if success and not self._closed and isValid(self):
+                        try:
+                            on_error(ERROR_MESSAGE)
+                        except Exception as error:
+                            logging.getLogger(__name__).warning("GUI error callback failed: %s", type(error).__name__)
             pending = self._pending.pop(key, None)
             if pending and not self._closed:
                 self._start(key, pending)

@@ -14,4 +14,4 @@ SUPABASE_KEY = os.getenv("SUPABASE_KEY", "")
 
 APP_NAME = "Hệ Thống Chấm Công Nhà Thuốc"
 APP_VERSION = "1.0.0"
-BACKEND_VERSION = 3
+BACKEND_VERSION = 4

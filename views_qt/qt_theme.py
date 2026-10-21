@@ -18,7 +18,7 @@ THEMES = {
         "accent": "#2563eb", "accent_hover": "#1d4ed8", "accent_border": "#3b82f6",
         "focus": "#93c5fd", "selection": "#244786", "selection_text": "#ffffff",
         "header": "#202d44", "header_text": "#cbd5e1", "clock": "#93c5fd",
-        "error": "#fca5a5", "weekend": "#fda4af",
+        "error": "#fca5a5", "weekend": "#fda4af", "success": "#86efac",
     },
     "light": {
         "window": "#f3f6fa", "surface": "#ffffff", "alternate": "#f1f5f9",
@@ -28,7 +28,7 @@ THEMES = {
         "accent": "#1d4ed8", "accent_hover": "#1e40af", "accent_border": "#1d4ed8",
         "focus": "#2563eb", "selection": "#dbeafe", "selection_text": "#172554",
         "header": "#e8eef6", "header_text": "#334155", "clock": "#1d4ed8",
-        "error": "#b91c1c", "weekend": "#b91c1c",
+        "error": "#b91c1c", "weekend": "#b91c1c", "success": "#166534",
     },
 }
 

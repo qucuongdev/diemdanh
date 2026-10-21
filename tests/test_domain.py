@@ -1,6 +1,6 @@
 import unittest
 from core.domain import display_time, display_duration, parse_timestamp, first_attendance, validate_profile, safe_excel_text
-from core.domain import timestamp_tooltip
+from core.domain import timestamp_tooltip, attendance_work_credit, attendance_notes
 from core.security import validate_public_key
 from core.reports import summarize, export_attendance
 from pathlib import Path
@@ -10,6 +10,52 @@ from datetime import timedelta
 
 
 class DomainTests(unittest.TestCase):
+    def test_work_credit_clips_to_shift_and_handles_late_and_early_attendance(self):
+        base = {"schedules": {"work_date": "2026-10-21", "shifts": {
+            "start_time": "08:00:00", "end_time": "16:00:00"}}}
+        cases = [
+            ("07:30:00", "16:30:00", 480, 0, "Done"),
+            ("08:15:00", "16:30:00", 465, 15, "Thiếu 15 phút"),
+            ("07:30:00", "15:00:00", 420, 60, "Thiếu 01:00"),
+            ("08:15:00", "15:45:00", 450, 30, "Thiếu 30 phút"),
+            ("08:00:01", "16:00:00", 479, 1, "Thiếu 1 phút"),
+            ("06:00:00", "07:00:00", 0, 480, "Thiếu 08:00"),
+            ("17:00:00", "18:00:00", 0, 480, "Thiếu 08:00"),
+        ]
+        for start, end, minutes, missing, status in cases:
+            with self.subTest(start=start, end=end):
+                credit = attendance_work_credit({**base,
+                    "check_in": f"2026-10-21T{start}+07:00",
+                    "check_out": f"2026-10-21T{end}+07:00"})
+                self.assertEqual((credit.minutes, credit.missing_minutes, credit.status), (minutes, missing, status))
+        self.assertEqual(display_duration(480), "08:00")
+        self.assertEqual(display_duration(465), "07:45")
+        self.assertEqual(display_duration(0), "0 phút")
+        self.assertEqual(display_duration(None), "—")
+
+    def test_work_credit_overnight_uses_shift_date_and_preserves_timezone(self):
+        record = {"schedules": {"work_date": "2026-10-21", "shifts": {
+            "start_time": "22:00:00", "end_time": "06:00:00"}},
+            "check_in": "2026-10-21T15:15:00Z", "check_out": "2026-10-21T23:30:00Z"}
+        credit = attendance_work_credit(record)
+        self.assertEqual((credit.minutes, credit.missing_minutes), (465, 15))
+        record["schedules"]["shifts"]["end_time"] = "22:00:00"
+        record.update(check_in="2026-10-21T22:00:00+07:00", check_out="2026-10-22T22:00:00+07:00")
+        self.assertEqual(attendance_work_credit(record).minutes, 1440)
+
+    def test_work_credit_never_marks_incomplete_or_invalid_records_done(self):
+        self.assertEqual(attendance_work_credit({}).status, "Chưa check-in")
+        self.assertEqual(attendance_work_credit({"check_in": "2026-10-21T01:00:00Z"}).status,
+                         "Chưa check-out")
+        base = {"check_in": "2026-10-21T01:00:00Z", "check_out": "2026-10-21T09:00:00Z",
+                "schedules": {"work_date": "2026-10-21", "shifts": {
+                    "start_time": "08:00:00", "end_time": "16:00:00"}}}
+        for patch in ({"schedules": None}, {"schedules": {}}, {"check_out": "invalid"},
+                      {"check_out": "2026-10-21T00:00:00Z"}):
+            credit = attendance_work_credit({**base, **patch})
+            self.assertIsNone(credit.minutes)
+            self.assertEqual(credit.status, "Không đủ dữ liệu")
+
     def test_timestamps_convert_to_vietnam_time_and_accept_null(self):
         self.assertEqual(display_time("2026-10-20T01:00:59Z"), "08:00")
         self.assertEqual(display_time("2026-10-20T08:00:00+07:00"), "08:00")
@@ -18,14 +64,21 @@ class DomainTests(unittest.TestCase):
         self.assertEqual(display_time(None), "—")
         self.assertEqual(display_time("bad input"), "—")
 
-    def test_duration_is_hours_minutes_and_never_wraps_at_24_hours(self):
-        for minutes, expected in [(0, "00:00"), (1, "00:01"), (59, "00:59"), (60, "01:00"),
+    def test_duration_switches_at_one_hour_and_never_wraps_at_24_hours(self):
+        for minutes, expected in [(0, "0 phút"), (1, "1 phút"), (59, "59 phút"), (60, "01:00"), (61, "01:01"),
                                   (369, "06:09"), (1501, "25:01"), (6000, "100:00")]:
             with self.subTest(minutes=minutes):
                 self.assertEqual(display_duration(minutes), expected)
         for invalid in (None, -1, True, "369", 1.5):
             with self.subTest(invalid=invalid):
                 self.assertEqual(display_duration(invalid), "—")
+
+    def test_attendance_notes_use_minutes_or_hours_for_each_duration(self):
+        self.assertEqual(attendance_notes({"is_late": True, "late_minutes": 59,
+                                          "is_early_leave": True, "early_minutes": 60}),
+                         "Muộn 59 phút · Về sớm 01:00")
+        self.assertEqual(attendance_notes({"is_late": True, "late_minutes": 1501}), "Muộn 25:01")
+        self.assertEqual(attendance_notes({}), "")
 
     def test_minute_display_retains_exact_second_and_local_date_in_tooltip(self):
         value = "2026-10-20T18:00:01Z"
@@ -44,7 +97,7 @@ class DomainTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "duration.xlsx"
             schedules = [{"attendance": {"check_in": "2026-10-20T01:08:59Z", "late_minutes": minutes}}
-                         for minutes in (369, 1501, None)]
+                         for minutes in (369, 1501, None, 0, 59, 60, 61)]
             export_attendance(path, schedules, "Test")
             workbook = openpyxl.load_workbook(path)
             sheet = workbook.active
@@ -53,8 +106,13 @@ class DomainTests(unittest.TestCase):
             self.assertEqual(sheet["E3"].value, "08:08")
             self.assertEqual(sheet["G3"].value, timedelta(hours=6, minutes=9))
             self.assertEqual(sheet["G4"].value, timedelta(hours=25, minutes=1))
-            self.assertEqual(sheet["G4"].number_format, "[h]:mm")
+            self.assertEqual(sheet["G4"].number_format, "[hh]:mm")
             self.assertIsNone(sheet["G5"].value)
+            self.assertEqual(sheet["G2"].value, "Thời gian muộn")
+            for row, minutes in [(6, 0), (7, 59), (8, 60), (9, 61)]:
+                self.assertEqual(sheet.cell(row, 7).value, timedelta(minutes=minutes))
+                self.assertEqual(sheet.cell(row, 7).number_format,
+                                 '[m]" phút"' if minutes < 60 else "[hh]:mm")
             workbook.close()
 
     def test_attendance_relation_handles_dict_list_and_null(self):

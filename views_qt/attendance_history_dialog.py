@@ -1,16 +1,24 @@
 from datetime import date
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QComboBox, QLineEdit
-from core.domain import display_time, local_now, attendance_notes, timestamp_tooltip
+from PySide6.QtGui import QColor
+from PySide6.QtWidgets import QApplication, QDialog, QVBoxLayout, QHBoxLayout, QComboBox, QLineEdit
+from core.domain import display_time, local_now, timestamp_tooltip, attendance_work_credit, display_duration
 from views_qt.common import Page, TableModel, table_for, button, label
 
 
 def history_status(record):
-    state = "Đã check-out" if record.get("check_out") else "Chưa check-out"
-    notes = attendance_notes(record, include_unit=False)
-    if notes:
-        return notes if record.get("check_out") else f"{notes} · {state}"
-    return state
+    credit = attendance_work_credit(record)
+    return f"● {credit.status}" if credit.minutes is not None else credit.status
+
+
+class HistoryTableModel(TableModel):
+    def data(self, index, role=Qt.ItemDataRole.DisplayRole):
+        if index.isValid() and index.column() == self.columnCount() - 1 and role == Qt.ItemDataRole.ForegroundRole:
+            credit = attendance_work_credit(self.records[index.row()])
+            if credit.minutes is not None:
+                colors = QApplication.instance().theme_manager.colors
+                return QColor(colors["success" if credit.missing_minutes == 0 else "error"])
+        return super().data(index, role)
 
 
 class HistoryPage(Page):
@@ -21,7 +29,7 @@ class HistoryPage(Page):
         self.offset = 0
         self.ready = False
         self.target_user_id = target_user_id
-        self.heading("Lịch sử chấm công", "Giờ hiển thị theo Việt Nam · Thống kê áp dụng cho trang đang xem.")
+        self.heading("Lịch sử chấm công", "Giờ làm chỉ tính trong khung ca · Thống kê áp dụng cho trang đang xem.")
         filters = QHBoxLayout()
         self.date_entry = QLineEdit(str(target_date or ""))
         self.date_entry.setPlaceholderText("Ngày YYYY-MM-DD hoặc để trống")
@@ -35,7 +43,7 @@ class HistoryPage(Page):
         self.root.addLayout(filters)
         self.summary = label()
         self.root.addWidget(self.summary)
-        self.model = TableModel(
+        self.model = HistoryTableModel(
             [
                 ("Nhân viên", lambda r: (r.get("profiles") or {}).get("full_name")),
                 ("Chi nhánh", lambda r: (r.get("branches") or {}).get("name")),
@@ -45,11 +53,15 @@ class HistoryPage(Page):
                  lambda r: timestamp_tooltip(r.get("check_in"))),
                 ("Check-out", lambda r: display_time(r.get("check_out")),
                  lambda r: timestamp_tooltip(r.get("check_out"))),
-                ("Trạng thái (giờ:phút)", history_status),
+                ("Giờ làm", lambda r: display_duration(attendance_work_credit(r).minutes),
+                 lambda r: "Chỉ tính thời gian trong ca; phút làm tròn xuống, phút thiếu làm tròn lên."
+                 " Chưa trừ nghỉ giữa ca."),
+                ("Trạng thái", history_status),
             ],
             self,
         )
         self.table = table_for(self.model)
+        QApplication.instance().theme_manager.changed.connect(self.table.viewport().update)
         self.root.addWidget(self.table, 1)
         self.root.addWidget(self.status)
         footer = QHBoxLayout()

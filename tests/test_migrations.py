@@ -8,11 +8,39 @@ from urllib.parse import unquote, urlsplit
 import sys
 import unittest
 from unittest.mock import patch
+from unittest.mock import MagicMock
+from types import SimpleNamespace
 
 import migrate
 
 
 class MigrationReviewTests(unittest.TestCase):
+    def test_apply_refuses_unrecorded_earlier_migration_before_executing_sql(self):
+        connection = MagicMock()
+        connection.execute.return_value.fetchone.side_effect = [None, (1,)]
+        driver = SimpleNamespace(connect=MagicMock(), OperationalError=OSError)
+        driver.connect.return_value.__enter__.return_value = connection
+        with patch.dict(sys.modules, {"psycopg": driver}), patch("migrate.database_uri", return_value="offline"), \
+             patch.object(sys, "argv", ["migrate.py", "--file", "migrations/20261020_04_qt_completion.sql", "--apply"]), \
+             redirect_stdout(io.StringIO()):
+            self.assertEqual(migrate.main(), 1)
+        connection.transaction.assert_not_called()
+        for call in connection.execute.call_args_list:
+            self.assertNotIn("CREATE OR REPLACE FUNCTION", call.args[0])
+
+    def test_apply_skips_recorded_current_file_without_replaying_it(self):
+        path = migrate.candidates("migrations/20261021_05_personnel_payroll.sql")[0]
+        import hashlib
+        connection = MagicMock()
+        connection.execute.return_value.fetchone.return_value = (hashlib.sha256(path.read_bytes()).hexdigest(),)
+        driver = SimpleNamespace(connect=MagicMock(), OperationalError=OSError)
+        driver.connect.return_value.__enter__.return_value = connection
+        with patch.dict(sys.modules, {"psycopg": driver}), patch("migrate.database_uri", return_value="offline"), \
+             patch.object(sys, "argv", ["migrate.py", "--file", "migrations/20261021_05_personnel_payroll.sql", "--apply"]), \
+             redirect_stdout(io.StringIO()):
+            self.assertEqual(migrate.main(), 0)
+        connection.transaction.assert_not_called()
+
     def setUp(self):
         self.project_url = "https://abcdefghijklmnopqrst.supabase.co"
         env = patch.dict(os.environ, {"SUPABASE_DB_URL": "", "SUPABASE_URL": self.project_url})

@@ -1,6 +1,7 @@
 import subprocess
 import uuid
 import sys
+import logging
 from functools import lru_cache
 from threading import Lock
 
@@ -73,7 +74,7 @@ def _resolve_hardware_uuid() -> str:
             return output_cpu
 
     except Exception as e:
-        print(f"[CẢNH BÁO] Không lấy được Hardware ID qua PowerShell: {e}")
+        logging.getLogger(__name__).warning("Device identity lookup failed: %s", type(e).__name__)
 
     # Fallback cuối cùng: Lấy MAC-based UUID qua python uuid module
     return str(uuid.UUID(int=uuid.getnode()))

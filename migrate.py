@@ -116,6 +116,13 @@ def main():
                         raise ValueError("Applied migration changed; create a new migration instead")
                     print(f"Skip applied migration: {name}")
                     continue
+                if name.startswith("migrations/") and connection.execute(
+                    "SELECT 1 FROM public._schema_migrations WHERE filename LIKE 'migrations/%%' "
+                    "AND filename > %s LIMIT 1", (name,)
+                ).fetchone():
+                    # A previous SQL Editor deployment may have no CLI history.
+                    # Replaying it could replace newer functions with older versions.
+                    raise ValueError("Unrecorded earlier migration; review deployment history before applying")
                 # Files can also be pasted into SQL editor with their own transaction.
                 sql = re.sub(r"(?m)^(BEGIN;|COMMIT;)\s*$", "", path.read_text(encoding="utf-8"))
                 with connection.transaction():

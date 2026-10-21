@@ -45,7 +45,7 @@ class ReportView(Page):
                 ("Tổng ca", lambda r: r["total"]),
                 ("Đúng giờ", lambda r: r["ontime"]),
                 ("Muộn", lambda r: r["late"]),
-                ("Muộn (giờ:phút)", lambda r: display_duration(r["late_minutes"])),
+                ("Thời gian muộn", lambda r: display_duration(r["late_minutes"])),
                 ("Nghỉ phép", lambda r: r["leave"]),
                 ("Chưa ghi nhận", lambda r: r["unrecorded"]),
             ],

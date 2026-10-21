@@ -5,6 +5,8 @@ from urllib.parse import urlparse, unquote
 import logging
 from core.domain import LOCAL_TZ, local_now, validate_profile, first_attendance
 from core.security import validate_public_key, requires_roles
+from core.personnel_service import PersonnelServiceMixin
+from core.ui_messages import SYSTEM_UNAVAILABLE, CONNECTION_UNAVAILABLE, public_mutation_result
 from PIL import Image
 from supabase import create_client, Client, ClientOptions
 from httpx import TransportError
@@ -15,7 +17,7 @@ class ServiceError(RuntimeError):
     pass
 
 
-class SupabaseService:
+class SupabaseService(PersonnelServiceMixin):
     _instance = None
 
     def __new__(cls):
@@ -29,7 +31,7 @@ class SupabaseService:
         return cls._instance
 
     def init_client(self):
-        self.configuration_error = "Chưa cấu hình Supabase. Kiểm tra SUPABASE_URL và SUPABASE_KEY trong file .env."
+        self.configuration_error = SYSTEM_UNAVAILABLE
         if SUPABASE_URL and SUPABASE_KEY and SUPABASE_URL != "https://your-project-id.supabase.co":
             try:
                 validate_public_key(SUPABASE_KEY)
@@ -41,7 +43,7 @@ class SupabaseService:
                 self.configuration_error = ""
             except Exception as e:
                 logging.getLogger(__name__).warning("Supabase configuration rejected: %s", type(e).__name__)
-                self.configuration_error = "Không thể khởi tạo Supabase. Kiểm tra URL, public key và thư viện đã cài."
+                self.configuration_error = SYSTEM_UNAVAILABLE
                 self.client = None
         else:
             self.client = None
@@ -50,7 +52,7 @@ class SupabaseService:
         return self.client is not None
 
     def check_backend(self):
-        """Return actionable, sanitized diagnostics; never bypass the version gate."""
+        """Retain internal diagnostic codes; show only generic public messages."""
         try:
             version = self.client.rpc("rpc_client_version", {}).execute().data
         except Exception as exc:
@@ -58,18 +60,18 @@ class SupabaseService:
             logging.getLogger(__name__).warning("Backend compatibility check failed: %s", type(exc).__name__)
             if code in ("PGRST202", "42883"):
                 return {"success": False, "code": "backend_missing", "message":
-                    "Máy chủ thiếu bản cập nhật. Quản trị viên cần áp dụng các migration theo README rồi đăng nhập lại."}
+                    SYSTEM_UNAVAILABLE}
             if code in ("42501", "PGRST301", "PGRST302", "PGRST303"):
                 return {"success": False, "code": "backend_permission", "message":
-                    "Không có quyền kiểm tra phiên bản máy chủ. Liên hệ quản trị viên kiểm tra quyền RPC và phiên đăng nhập."}
+                    SYSTEM_UNAVAILABLE}
             if isinstance(exc, (TransportError, ConnectionError, TimeoutError)):
                 return {"success": False, "code": "backend_network", "message":
-                    "Không thể kiểm tra phiên bản máy chủ do lỗi kết nối. Kiểm tra mạng rồi đăng nhập lại."}
+                    CONNECTION_UNAVAILABLE}
             return {"success": False, "code": "backend_check_failed", "message":
-                "Không thể kiểm tra phiên bản máy chủ. Thử đăng nhập lại hoặc liên hệ quản trị viên kiểm tra RPC."}
+                SYSTEM_UNAVAILABLE}
         if type(version) is not int or version != BACKEND_VERSION:
             return {"success": False, "code": "backend_incompatible", "message":
-                f"Ứng dụng cần backend phiên bản {BACKEND_VERSION}. Quản trị viên cần đối chiếu migration và phiên bản ứng dụng theo README."}
+                SYSTEM_UNAVAILABLE}
         return {"success": True}
 
     def _sanitize_error(
@@ -367,7 +369,7 @@ class SupabaseService:
                 },
             ).execute()
             self._cache["staffs"] = None
-            return res.data or {"success": True, "message": f"Tạo tài khoản thành công cho {full_name}!"}
+            return public_mutation_result(res.data)
         except Exception as e:
             err_str = str(e)
             logging.getLogger(__name__).warning("User creation failed: %s", type(e).__name__)
@@ -379,11 +381,11 @@ class SupabaseService:
             if "đã tồn tại" in err_str or "duplicate" in err_str:
                 return {
                     "success": False,
-                    "message": f"Tên đăng nhập hoặc Email '{email}' đã được sử dụng. Vui lòng chọn tên khác!",
+                    "message": "Tên đăng nhập hoặc email đã được sử dụng. Vui lòng chọn tên khác.",
                 }
             return {
                 "success": False,
-                "message": "Không thể tạo tài khoản nhân viên. Vui lòng liên hệ Quản trị viên hệ thống để kiểm tra quyền hạn máy chủ!",
+                "message": SYSTEM_UNAVAILABLE,
             }
 
     @requires_roles("admin")
@@ -406,12 +408,12 @@ class SupabaseService:
                 },
             ).execute()
             self._cache["staffs"] = None
-            return res.data or {"success": True, "message": "Cập nhật thành công!"}
+            return public_mutation_result(res.data)
         except Exception as e:
             return {
                 "success": False,
                 "message": self._sanitize_error(
-                    e, "Không thể cập nhật nhân sự. Kiểm tra RPC quản trị trên máy chủ."
+                    e, SYSTEM_UNAVAILABLE
                 ),
             }
 
@@ -423,12 +425,12 @@ class SupabaseService:
         try:
             res = self.client.rpc("rpc_delete_user", {"p_user_id": user_id}).execute()
             self._cache["staffs"] = None
-            return res.data or {"success": True, "message": "Đã xóa tài khoản nhân viên thành công!"}
+            return public_mutation_result(res.data)
         except Exception as e:
             return {
                 "success": False,
                 "message": self._sanitize_error(
-                    e, "Không thể xóa nhân sự. Kiểm tra RPC quản trị trên máy chủ."
+                    e, SYSTEM_UNAVAILABLE
                 ),
             }
 
@@ -619,7 +621,7 @@ class SupabaseService:
             res = self.client.rpc(
                 "rpc_check_in", {"p_schedule_id": schedule_id, "p_device_uuid": device_uuid}
             ).execute()
-            return res.data
+            return public_mutation_result(res.data)
         except Exception as e:
             return {
                 "success": False,
@@ -633,7 +635,7 @@ class SupabaseService:
             res = self.client.rpc(
                 "rpc_check_out", {"p_attendance_id": attendance_id, "p_device_uuid": device_uuid}
             ).execute()
-            return res.data
+            return public_mutation_result(res.data)
         except Exception as e:
             return {
                 "success": False,

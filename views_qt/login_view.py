@@ -3,6 +3,7 @@ from PySide6.QtWidgets import QWidget, QVBoxLayout, QFrame, QLineEdit
 from core.supabase_service import SupabaseService
 from core.hardware import get_hardware_uuid
 from core.domain import validate_profile
+from core.ui_messages import UserInputError
 from core.qt_worker import TaskRunner
 from views_qt.common import label, button, StatusLabel
 from views_qt.qt_theme import ThemeToggleButton
@@ -69,9 +70,9 @@ class LoginView(QWidget):
                 if profile["role"] != "admin" and not self.supabase.check_device_permission(
                     profile["branch_id"], get_hardware_uuid()
                 ):
-                    raise ValueError("Máy này chưa được cấp phép tại chi nhánh của bạn.")
+                    raise UserInputError("Máy này chưa được cấp phép tại chi nhánh của bạn.")
                 return {"success": True, "profile": profile}
-            except ValueError as exc:
+            except UserInputError as exc:
                 self.supabase.logout()
                 return {"success": False, "message": str(exc)}
             except Exception:

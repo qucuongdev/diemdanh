@@ -32,16 +32,35 @@ verification. Keep README focused on concise Git Bash setup/run commands.
 - `tests/`: isolated unittest tests; never contact production or load real secrets.
 - PySide6 is the only UI. Benchmark compatibility launchers measure Qt tables;
   no CustomTkinter/Tkinter runtime or views remain. Do not reintroduce them.
-- App 1.0.0 requires backend 3, published by migration 04 only after its transaction
+- App 1.0.0 now requires backend 4, published by migration 05 only after its transaction
   commits. `preflight.sql` and `DEPLOYMENT.md` describe separate backend review.
 - Profile mutations use admin RPCs; migration 04 removes direct profile writes,
   restores scoped shift policies and protects recorded shift times.
 - `views_qt/qt_theme.py` owns light/dark tokens, native Qt palettes and a shared
   theme controller. QSettings stores only the appearance preference; tests and
   benchmarks use no real user settings by default.
-- Clocks display HH:mm; durations format server integer minutes as unbounded
-  hours:minutes. Source seconds/timezones remain intact. Excel durations are
-  numeric with [h]:mm formatting, not decimal hours or a wrapped time of day.
+- Clocks display HH:mm; all durations below 60 minutes display N phút, and durations
+  of at least 60 minutes display unbounded HH:mm (60 -> 01:00; 1501 -> 25:01).
+  Source seconds/timezones remain intact. Excel durations stay numeric with
+  [m]" phút" below one hour and [hh]:mm otherwise, never wrapped at 24 hours.
+- Attendance history shows shift-clipped worked time and a separate
+  Done/Thiếu duration status using theme success/error colors. Worked minutes round
+  down and missing minutes round up from exact timestamps. Overnight shifts are
+  supported; incomplete/invalid data never receives Done. No break calculation is
+  implemented; backend check-out rules remain unchanged.
+- `core/personnel_service.py` provides typed admin-only RPC methods through
+  SupabaseService. Private HR fields, salary terms, daily classifications and
+  immutable payroll snapshots are separate from broadly readable profiles.
+- Migration 05 owns the canonical numeric payroll calculator, effective-month
+  terms, revision checks, advisory locks, audit events and birthday reminders.
+  `core/personnel.py` owns validation/presentation; `core/payroll_export.py` exports
+  all fetched pages atomically. `views_qt/personnel_dialog.py` and `payroll_view.py`
+  own admin UI. See PAYROLL.md for formulas, accepted defaults and limitations.
+- `core/ui_messages.py` owns public system-failure text and code-owned validation
+  errors. RPC response messages are not forwarded to the desktop UI. A fixed
+  catalogue is checked again at UI error sinks; unknown messages (even tagged
+  UserInputError) fall back to generic text. Payroll warnings have their own
+  catalogue and validated date prefixes, including table tooltips/Excel exports.
 
 ## Rules and conventions
 
@@ -61,6 +80,20 @@ verification. Keep README focused on concise Git Bash setup/run commands.
   Fail closed for inactive users, missing branch, invalid role or invalid device.
 - Never ship service-role/secret keys in the desktop client. Never print credentials
   or raw server exceptions to users. Keep proof images private and use signed URLs.
+- ABSOLUTE UI RULE: never display system/infrastructure errors or implementation
+  diagnostics in desktop UI: no backend versions, RPC/function/table/schema names,
+  migration instructions, SQL/error codes, stack traces, paths, environment variable
+  names, URLs, credentials or raw exception/server message strings. System failures
+  must use fixed generic text from core/ui_messages.py. Only code-owned
+  UserInputError wording and fixed business validations may be shown; unexpected
+  ValueError is a system failure. Administrative CLI/docs remain separate from UI.
+  Never bypass authorization/version gates to hide errors. New changes must pass
+  regression checks for error disclosure before being reported complete.
+  Form, status-label, HR, birthday and payroll error sinks must call
+  public_error_message; payroll business warnings must call public_payroll_warning.
+  Do not log raw callback/render exceptions or tracebacks. Callback failures must
+  reach the owner's generic error handler and restore controls; invalid cell
+  renderers show a placeholder/custom tooltip, never exception text.
 - Avoid insecure CRUD fallbacks when an authorization RPC is unavailable.
 - Do not automatically execute SQL migrations or mutate real backend data as tests.
 - Tests must cover behavior: roles, request races, errors, destruction, pagination,
@@ -78,6 +111,10 @@ python -m pip install -r requirements-dev.txt
 python -m ruff check core views_qt main.py migrate.py tests benchmark.py
 python migrate.py --all-pending  # Review only: no database connection or .env load
 ```
+
+Optional SQL QA uses in-memory PostgreSQL/PGlite with fake Auth and a minimal
+base schema: `node tests/payroll_sql_qa.mjs`. See PAYROLL.md for isolated dependency
+setup. It never connects to Supabase or replaces production/real-role acceptance.
 
 ## Current change record / verification
 
@@ -175,12 +212,81 @@ python migrate.py --all-pending  # Review only: no database connection or .env l
   consistency, internal links and patch whitespace; no app, SQL or backend checks
   were rerun for this documentation-only handoff.
 
+- 2026-10-21: Removed internal ID suffixes from employee filters and employee/shift
+  choices in the schedule dialog. Combo boxes retain full IDs as item data.
+  Verified 36 offline Qt tests and Ruff for schedule_view.py. No backend or
+  production verification performed; no database migration required.
+
+- 2026-10-21: Added worked hours and completion status columns to attendance
+  history, clipping actual attendance to shift boundaries with overnight support.
+  Added centralized success colors and neutral incomplete/invalid states. Verified
+  76 offline tests, Ruff, Python source compilation and patch whitespace; visually
+  inspected fake-data previews in both themes. No SQL change, backend deployment,
+  production verification, salary calculation or check-out policy change.
+
+- 2026-10-21: Unified duration display across attendance notes, worked hours,
+  missing-time status, reports and numeric Excel exports: under one hour uses
+  minutes, otherwise HH:mm without a 24-hour wrap. Removed obsolete unit labels
+  and the separate worked-hours formatter. Verified 77 offline tests (including
+  59/60/61-minute boundaries and Excel value/format round trips), Ruff, Python
+  source compilation and patch whitespace. No backend/data changes or production
+  verification; native Excel rendering was not verified.
+
+- 2026-10-21: Implemented admin HR/payroll and birthdays; added reviewed-as-code
+  migration 05 and raised required backend to 4 (app remains 1.0.0). Private fields
+  stay out of profiles. Salary terms have month-based history, payroll day overrides
+  require reasons, snapshots retain original sources/identity/branch, and finalizing
+  recomputes and checks a stable source signature under a per-employee lock. UI has
+  pagination, stale-result cancellation, duplicate-write guards and full-filter
+  worker Excel export. Verified 92 offline Python tests, Ruff, source compilation,
+  patch whitespace, SQL/PLpgSQL parsing and 101 in-memory PostgreSQL/PGlite checks;
+  inspected fake-data HR/payroll/detail forms in both themes. No dependency changes
+  for the app; optional PGlite QA dependency was installed in a temporary directory.
+  No real Supabase migration, Auth/PostgREST, concurrent-session locking, production
+  payroll, large-data performance or native Excel verification. See PAYROLL.md and
+  DEPLOYMENT.md before applying migration 05 on a separate test backend.
+
+- 2026-10-21: User explicitly authorized live migration 05 and requested that
+  system errors never appear in UI. Installed psycopg/psycopg-binary/tzdata as admin
+  tooling after a full requirements fetch timed out; pip check passed. A temporary
+  interactive helper accepted the database password via hidden input (never in
+  chat, command arguments, environment or stored files), checked backend 3 baseline,
+  saved only the prior version function definition locally, then ran the existing
+  migration CLI for file 05. Migration committed; the stored checksum, backend 4
+  function, all five new RLS tables and lack of direct anon/authenticated table
+  privileges were verified on the real database. No employee records were read
+  into output or changed, and no real role-login/payroll acceptance was performed.
+  Centralized generic UI messages, removed technical configuration/compatibility
+  text, blocked raw RPC message forwarding and separated UserInputError from
+  unexpected exceptions. Added fail-closed migration ordering to prevent an
+  untracked older SQL Editor migration from downgrading an already newer backend.
+  Verified 99 offline Python tests, Ruff, source compilation, pip check and patch
+  whitespace. No SQL migration file was modified after applying 05.
+
+- 2026-10-21: Reviewed all desktop error-display paths after live migration.
+  Found missing final filtering in generic forms/status labels, private HR and
+  birthday dialogs, payroll warning summaries/cells/tooltips, and callback/render
+  exception handling. Added an explicit public message catalogue (unknown and
+  forged validation text fails closed), translated known payroll warnings,
+  sanitized exported warning text, and routed GUI callback exceptions to custom
+  errors without raw tracebacks. Malformed mutation results now restore controls;
+  failed private reads leave editing disabled. Verified 108 offline Python tests,
+  Ruff, source compilation and whitespace. This follow-up changed no SQL and
+  performed no further backend writes; previous live metadata verification stands.
+
 ## Known deployment boundaries
 
 - Backend state cannot be inferred from local SQL. Security changes require applying
   the supplied migration in Supabase and testing with separate real role accounts.
 - Device UUID is a client-supplied identifier, not cryptographic device attestation.
-- No deployment or production verification has been performed in this change.
+- Migration 05 was explicitly authorized and applied; schema/version/checksum/RLS
+  metadata verification passed. Real Auth/PostgREST role acceptance, concurrent
+  payroll locking and production calculations remain unverified.
+- Payroll formulas implement the requested business rules,
+  with no tax/insurance/legal entitlement engine, holiday multipliers, transfer of
+  funds, partial-day paid leave or reopening of finalized months. Reminders require
+  the app open; no OS/email delivery. HR/payroll access is admin-only. Existing
+  historical timestamp issues must be investigated independently before payroll use.
 - Proof approval records a decision only; it does not correct attendance times.
   Shift swaps are leave requests without automatic replacement assignment.
   No distributable Windows executable has been built.

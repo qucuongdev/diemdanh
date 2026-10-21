@@ -2,6 +2,7 @@
 
 import base64
 import json
+from core.ui_messages import UserInputError
 
 
 def validate_public_key(key: str) -> None:
@@ -28,8 +29,8 @@ def requires_roles(*roles):
             try:
                 profile = validate_profile(self.current_profile)
                 if profile["role"] not in roles:
-                    raise ValueError("Bạn không có quyền thực hiện thao tác này.")
-            except ValueError as exc:
+                    raise UserInputError("Bạn không có quyền thực hiện thao tác này.")
+            except UserInputError as exc:
                 return {"success": False, "message": str(exc)}
             return method(self, *args, **kwargs)
 

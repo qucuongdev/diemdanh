@@ -47,7 +47,7 @@ def export_attendance(path, schedules, title):
     sheet = workbook.active
     sheet.title = "Chấm công"
     sheet.append([safe_excel_text(title)])
-    sheet.append(["STT", "Họ tên", "Ngày", "Ca", "Check-in", "Check-out", "Muộn (giờ:phút)", "Trạng thái"])
+    sheet.append(["STT", "Họ tên", "Ngày", "Ca", "Check-in", "Check-out", "Thời gian muộn", "Trạng thái"])
     for number, schedule in enumerate(schedules, 1):
         attendance = first_attendance(schedule)
         minutes = attendance.get("late_minutes")
@@ -68,7 +68,7 @@ def export_attendance(path, schedules, title):
                 }.get(schedule.get("status"), "Không rõ"),
             ]
         )
-        sheet.cell(number + 2, 7).number_format = "[h]:mm"
+        sheet.cell(number + 2, 7).number_format = '[m]" phút"' if type(minutes) is int and 0 <= minutes < 60 else "[hh]:mm"
     for cell in sheet[2]:
         cell.font = Font(bold=True, color="FFFFFF")
         cell.fill = PatternFill("solid", fgColor="2563EB")
